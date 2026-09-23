@@ -10,6 +10,7 @@ import networkx as nx
 import pandas as pd
 
 from .advanced_analysis import build_resilience_report, build_route_patterns
+from .route_evidence import enrich_route_evidence
 from .graph_features import assign_clusters, build_graph, calculate_features
 from .io_validation import file_hashes, load_data, validate_data
 from .scoring import build_cluster_summary, score_nodes
@@ -45,7 +46,7 @@ def analyze(data_dir: Path) -> AnalysisResult:
     scored = score_nodes(features)
     cluster_summary = build_cluster_summary(scored, communities, edges)
     resilience = build_resilience_report(graph, scored)
-    route_patterns = build_route_patterns(graph, scored)
+    route_patterns = enrich_route_evidence(build_route_patterns(graph, scored), tx)
 
     top = (
         scored.sort_values(["priority_score", "gid"], ascending=[False, True])
@@ -69,7 +70,7 @@ def analyze(data_dir: Path) -> AnalysisResult:
     )
     manifest = {
         "status": "completed",
-        "rules_version": "1.1.0",
+        "rules_version": "1.2.0",
         "input_sha256": file_hashes(data_dir),
         "duration_seconds": round(time.perf_counter() - started, 3),
         "python": platform.python_version(),

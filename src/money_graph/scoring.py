@@ -165,7 +165,7 @@ def score_nodes(features: pd.DataFrame) -> pd.DataFrame:
         if getattr(row, "rapid_flow_days", 0) > 0:
             flags.append("входящие и исходящие операции в окне 0–2 дня")
         if getattr(row, "cycle_size", 0) > 0:
-            flags.append(f"участник цикла из {int(row.cycle_size)} узлов")
+            flags.append(f"участник сильносвязной группы из {int(row.cycle_size)} узлов с циклами")
         if getattr(row, "max_same_day_payers", 0) >= 3:
             flags.append(
                 f"до {int(row.max_same_day_payers)} плательщиков переводили в один день"

@@ -848,6 +848,17 @@ elif view_mode == "patterns":
         st.info("Перезапустите пайплайн, чтобы построить устойчивые маршруты A→B→C.")
     else:
         patterns_view = route_patterns.copy()
+        only_selected = st.checkbox("Только маршруты выбранного участника", value=False)
+        if only_selected:
+            patterns_view = patterns_view[
+                patterns_view[["src", "via", "dst"]].eq(selected_gid).any(axis=1)
+            ]
+        if "temporal_status" in patterns_view:
+            dated_only = st.checkbox("Только пары с известным порядком по дням", value=False)
+            if dated_only:
+                patterns_view = patterns_view[
+                    patterns_view["temporal_status"] == "Порядок по дням соблюдён"
+                ]
         for column in ("src", "via", "dst"):
             patterns_view[column] = patterns_view[column].astype(str)
         patterns_view["via_role"] = patterns_view["via_role"].map(ROLE_LABELS).fillna(
@@ -856,6 +867,12 @@ elif view_mode == "patterns":
         st.caption(
             "Двухшаговые маршруты отсортированы по минимальной сумме на двух связях. "
             "Это кандидаты для проверки, а не доказательство движения одной суммы."
+        )
+        st.caption(
+            "Проверяются до 200 крупнейших структурных маршрутов. Для каждой пары "
+            "ищется конкретный вход и выход в окне 0–2 дня. Внутри одного дня порядок "
+            "неизвестен. Сопоставимые суммы: выход составляет 80–120% входа; "
+            "это настраиваемая в коде эвристика, а не нормативный порог."
         )
         st.dataframe(
             patterns_view,
@@ -874,6 +891,14 @@ elif view_mode == "patterns":
                 ),
                 "rapid_signal": st.column_config.CheckboxColumn("Быстрый транзит"),
                 "cycle_signal": st.column_config.CheckboxColumn("Цикл"),
+                "temporal_status": st.column_config.TextColumn("Проверка дат"),
+                "delay_days": st.column_config.NumberColumn("Разрыв, дней"),
+                "incoming_date": st.column_config.TextColumn("Дата входа"),
+                "outgoing_date": st.column_config.TextColumn("Дата выхода"),
+                "example_in_kzt": st.column_config.NumberColumn("Пример входа, ₸"),
+                "example_out_kzt": st.column_config.NumberColumn("Пример выхода, ₸"),
+                "amount_ratio": st.column_config.NumberColumn("Выход / вход", format="%.2f"),
+                "comparable_amounts": st.column_config.CheckboxColumn("Суммы сопоставимы"),
             },
         )
 
