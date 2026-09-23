@@ -93,7 +93,8 @@ col2.metric("Кластеров", len(clusters))
 col3.metric("Связей", f"{len(edges):,}".replace(",", " "))
 
 st.subheader("Приоритет проверки")
-view = top[top["role"].isin(selected_roles)]
+view = top[top["role"].isin(selected_roles)].copy()
+view["gid"] = view["gid"].astype(str)
 st.dataframe(view, width="stretch", hide_index=True)
 
 selected_gid = None
@@ -131,8 +132,11 @@ if selected_gid is not None:
         )
         render_neighborhood(nodes, edges, selected_gid)
         st.subheader("Наблюдаемые связи")
+        display_edges = neighborhood.sort_values("sum_kzt", ascending=False).copy()
+        display_edges["src"] = display_edges["src"].astype(str)
+        display_edges["dst"] = display_edges["dst"].astype(str)
         st.dataframe(
-            neighborhood.sort_values("sum_kzt", ascending=False),
+            display_edges,
             width="stretch",
             hide_index=True,
         )
