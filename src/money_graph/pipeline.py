@@ -14,6 +14,14 @@ from .io_validation import file_hashes, load_data, validate_data
 from .scoring import build_cluster_summary, score_nodes
 
 
+REQUIRED_NODE_COLUMNS = [
+    "gid", "role", "role_score", "cluster_id", "priority_score", "evidence"
+]
+ALLOWED_ROLES = {
+    "consolidator", "transit", "distributor", "terminal", "coordinator", "peripheral"
+}
+
+
 @dataclass
 class AnalysisResult:
     nodes: pd.DataFrame
@@ -34,9 +42,6 @@ def analyze(data_dir: Path) -> AnalysisResult:
     scored = score_nodes(features)
     cluster_summary = build_cluster_summary(scored, communities, edges)
 
-    required_nodes = scored[
-        ["gid", "role", "role_score", "cluster_id", "priority_score", "evidence"]
-    ].copy()
     top = (
         scored.sort_values(["priority_score", "gid"], ascending=[False, True])
         .head(20)
@@ -63,7 +68,7 @@ def analyze(data_dir: Path) -> AnalysisResult:
         "pandas": pd.__version__,
         "networkx": nx.__version__,
     }
-    return AnalysisResult(
+    result = AnalysisResult(
         nodes=scored,
         clusters=cluster_summary,
         top_nodes=top_nodes,
@@ -71,13 +76,52 @@ def analyze(data_dir: Path) -> AnalysisResult:
         quality_report=quality,
         manifest=manifest,
     )
+    validate_result(result)
+    return result
+
+
+def validate_result(result: AnalysisResult) -> None:
+    nodes = result.nodes
+    missing = [column for column in REQUIRED_NODE_COLUMNS if column not in nodes.columns]
+    if missing:
+        raise ValueError(f"В результате отсутствуют колонки: {missing}")
+    if nodes["gid"].duplicated().any():
+        raise ValueError("В результате повторяются gid")
+    if nodes[REQUIRED_NODE_COLUMNS].isna().any().any():
+        raise ValueError("Обязательные поля результата содержат пустые значения")
+    unknown_roles = set(nodes["role"]) - ALLOWED_ROLES
+    if unknown_roles:
+        raise ValueError(f"Неизвестные роли: {sorted(unknown_roles)}")
+    for column in ["role_score", "priority_score"]:
+        if not nodes[column].between(0, 1).all():
+            raise ValueError(f"{column} должен находиться в диапазоне 0–1")
+    if (nodes["evidence"].astype(str).str.len() > 200).any():
+        raise ValueError("evidence не должен превышать 200 символов")
+    if int(result.clusters["n_nodes"].sum()) != len(nodes):
+        raise ValueError("Сумма n_nodes кластеров не совпадает с числом узлов")
+    if set(result.clusters["cluster_id"]) != set(nodes["cluster_id"]):
+        raise ValueError("Набор cluster_id не согласован")
+
+    expected_top_size = min(20, len(nodes))
+    if len(result.top_nodes) != expected_top_size:
+        raise ValueError(f"Топ должен содержать {expected_top_size} строк")
+    if result.top_nodes["gid"].duplicated().any():
+        raise ValueError("В топе повторяются gid")
+    if not result.top_nodes["priority_score"].is_monotonic_decreasing:
+        raise ValueError("Топ не отсортирован по priority_score")
+    source = nodes.set_index("gid")
+    for row in result.top_nodes.itertuples(index=False):
+        if row.gid not in source.index:
+            raise ValueError(f"gid {row.gid} из топа отсутствует в узлах")
+        node = source.loc[row.gid]
+        if row.role != node["role"] or abs(row.priority_score - node["priority_score"]) > 1e-9:
+            raise ValueError(f"Топ не согласован с результатом для gid {row.gid}")
 
 
 def write_outputs(result: AnalysisResult, out_dir: Path) -> None:
+    validate_result(result)
     out_dir.mkdir(parents=True, exist_ok=True)
-    required = result.nodes[
-        ["gid", "role", "role_score", "cluster_id", "priority_score", "evidence"]
-    ]
+    required = result.nodes[REQUIRED_NODE_COLUMNS]
     required.to_csv(out_dir / "nodes_roles.csv", index=False)
     result.clusters.to_csv(out_dir / "clusters.csv", index=False)
     result.top_nodes.to_csv(out_dir / "top_nodes.csv", index=False)

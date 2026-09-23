@@ -7,7 +7,6 @@ from pathlib import Path
 
 import pandas as pd
 import streamlit as st
-import streamlit.components.v1 as components
 
 ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(ROOT / "src"))
@@ -70,7 +69,7 @@ def render_neighborhood(nodes: pd.DataFrame, edges: pd.DataFrame, selected_gid: 
         '"edges":{"smooth":{"type":"dynamic"},"color":{"color":"#94A3B8"}},'
         '"nodes":{"font":{"size":12,"face":"Arial"}}}'
     )
-    components.html(network.generate_html(), height=640, scrolling=False)
+    st.iframe(network.generate_html(), width="stretch", height=640)
 
 
 st.set_page_config(page_title="Граф денег", layout="wide")
@@ -95,7 +94,7 @@ col3.metric("Связей", f"{len(edges):,}".replace(",", " "))
 
 st.subheader("Приоритет проверки")
 view = top[top["role"].isin(selected_roles)]
-st.dataframe(view, use_container_width=True, hide_index=True)
+st.dataframe(view, width="stretch", hide_index=True)
 
 selected_gid = None
 if gid_value.strip():
@@ -134,6 +133,6 @@ if selected_gid is not None:
         st.subheader("Наблюдаемые связи")
         st.dataframe(
             neighborhood.sort_values("sum_kzt", ascending=False),
-            use_container_width=True,
+            width="stretch",
             hide_index=True,
         )
