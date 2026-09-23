@@ -125,7 +125,7 @@ st.set_page_config(
 
 with st.sidebar:
     st.title("Граф денег")
-    st.caption("Аналитическое рабочее место")
+    st.caption("Контур финансового анализа")
     st.divider()
     gid_value = st.text_input(
         "Найти участника",
@@ -159,14 +159,15 @@ with st.sidebar:
         wrap=True,
     )
     st.divider()
-    st.caption("Оценки формируют гипотезы для аналитика и не устанавливают виновность.")
+    st.caption("Система предлагает гипотезы. Решение принимает аналитик.")
 
 header = st.container(horizontal=True, horizontal_alignment="distribute", vertical_alignment="center")
 with header:
     with st.container():
+        st.caption("АНАЛИТИЧЕСКИЙ КОНТУР · ГЛУБИНА 4")
         st.title("Транзакционная сеть")
-        st.caption("Роли, денежные потоки и связи участников в одном рабочем пространстве")
-    st.badge("Данные готовы", icon=":material/check_circle:", color="green")
+        st.caption("Роли, потоки и связи участников")
+    st.badge("Расчёт готов", icon=":material/check_circle:", color="green")
 
 metrics = st.container(border=True, horizontal=True, horizontal_alignment="distribute")
 with metrics:
@@ -202,7 +203,7 @@ if query_error:
 table_col, card_col = st.columns([1.65, 1], gap="large")
 with table_col:
     with st.container(border=True):
-        st.caption("Выберите строку, чтобы открыть карточку участника")
+        st.caption("Выберите участника для проверки")
         if priority.empty:
             st.info("По выбранным ролям нет участников.")
             table_event = None
@@ -242,10 +243,10 @@ with card_col:
             st.metric("Сила роли", f"{float(node['role_score']):.2f}")
             st.metric("Приоритет", f"{float(node['priority_score']):.2f}")
             st.metric("Глубина", int(node["depth"]))
-        st.markdown("**Почему узел выделен**")
+        st.markdown("**Основание для проверки**")
         st.write(node["evidence"])
         if bool(node["truncated_by_depth"]):
-            st.warning("Граница depth=4: дальнейшие исходящие переводы не наблюдаются.")
+            st.warning("Данные заканчиваются на глубине 4. Следующие переводы не видны.")
 
 st.subheader("Анализ участника")
 view_mode = st.segmented_control(
@@ -312,11 +313,11 @@ else:
 with st.expander("Как читать результаты", icon=":material/info:"):
     st.markdown(
         """
-        **Роль** описывает наиболее выраженный паттерн движения денег. **Сила роли** показывает,
-        насколько признаки узла соответствуют этому паттерну. **Приоритет** помогает выстроить
-        очередь ручной проверки и учитывает роль, сетевую позицию и близость к seed-узлам.
+        **Роль** описывает основной паттерн движения денег. **Сила роли** показывает,
+        насколько признаки узла соответствуют этому паттерну. **Приоритет** задаёт очередь
+        ручной проверки с учётом роли, положения в сети и близости к seed-узлам.
 
-        Граф отражает только наблюдаемый фрагмент сети. Все выводы являются аналитическими
-        гипотезами и требуют проверки по первичным данным.
+        Граф показывает наблюдаемый фрагмент сети. Аналитик проверяет каждую гипотезу
+        по первичным данным.
         """
     )

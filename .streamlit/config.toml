@@ -1,20 +1,21 @@
 [theme]
 base = "light"
-primaryColor = "#2563EB"
-backgroundColor = "#FAFAFA"
-secondaryBackgroundColor = "#F3F4F6"
-textColor = "#111827"
-linkColor = "#2563EB"
-borderColor = "#E5E7EB"
+primaryColor = "#0F766E"
+backgroundColor = "#F5F3ED"
+secondaryBackgroundColor = "#EAE7DE"
+textColor = "#17201E"
+linkColor = "#0F766E"
+borderColor = "#C9CEC7"
 showWidgetBorder = true
 showSidebarBorder = true
-baseRadius = "0.65rem"
-buttonRadius = "0.65rem"
-font = "'Inter':https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap"
-headingFont = "'Inter':https://fonts.googleapis.com/css2?family=Inter:wght@500;600;700&display=swap"
+baseRadius = "0.2rem"
+buttonRadius = "0.2rem"
+font = "'Barlow':https://fonts.googleapis.com/css2?family=Barlow:wght@400;500;600&display=swap"
+headingFont = "'Archivo':https://fonts.googleapis.com/css2?family=Archivo:wght@600;700;800&display=swap"
+codeFont = "'JetBrains Mono':https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500&display=swap"
 baseFontSize = 15
 
 [theme.sidebar]
-backgroundColor = "#FFFFFF"
-secondaryBackgroundColor = "#F3F4F6"
-borderColor = "#E5E7EB"
+backgroundColor = "#EEECE5"
+secondaryBackgroundColor = "#E2DFD5"
+borderColor = "#C9CEC7"
