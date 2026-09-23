@@ -61,6 +61,35 @@ def node_label(gid: int, selected_gid: int) -> str:
     return value if int(gid) == selected_gid else f"…{value[-6:]}"
 
 
+def analyst_rationale(row: pd.Series) -> str:
+    payers = int(row["in_deg"])
+    recipients = int(row["out_deg"])
+    incoming = float(row["in_kzt"])
+    outgoing = float(row["out_kzt"])
+
+    if incoming > 0 and outgoing > 0:
+        forwarded_share = outgoing / incoming * 100
+        if forwarded_share > 150:
+            outgoing_multiple = outgoing / incoming
+            return (
+                f"Получает от {payers} плательщиков и переводит {recipients} получателям. "
+                f"Исходящий объём в {outgoing_multiple:.1f} раза выше наблюдаемого входящего; "
+                "входящий контур может быть неполным."
+            )
+        return (
+            f"Получает от {payers} плательщиков и переводит {forwarded_share:.0f}% "
+            f"входящего объёма {recipients} получателям."
+        )
+    if incoming > 0:
+        return f"Получает от {payers} плательщиков; исходящие переводы в выгрузке не наблюдаются."
+    if outgoing > 0:
+        return (
+            f"Переводит деньги {recipients} получателям; входящий поток отсутствует "
+            "или не попал в наблюдаемый фрагмент."
+        )
+    return "Наблюдаемых входящих и исходящих переводов нет."
+
+
 def render_neighborhood(nodes: pd.DataFrame, edges: pd.DataFrame, selected_gid: int) -> None:
     from pyvis.network import Network
 
@@ -180,6 +209,10 @@ active_roles = selected_roles or role_options
 priority = top[top["role"].isin(active_roles)].copy()
 priority["gid_display"] = priority["gid"].astype(str)
 priority["role_display"] = priority["role"].map(ROLE_LABELS).fillna(priority["role"])
+rationale_by_gid = {
+    int(row["gid"]): analyst_rationale(row) for _, row in nodes.iterrows()
+}
+priority["rationale"] = priority["gid"].map(rationale_by_gid)
 
 selected_gid = st.session_state.get("selected_gid")
 query_error = None
@@ -200,7 +233,7 @@ st.subheader("Приоритет проверки")
 if query_error:
     st.warning(query_error, icon=":material/search_off:")
 
-table_col, card_col = st.columns([1.65, 1], gap="large")
+table_col, card_col = st.columns([1.75, 1], gap="large")
 with table_col:
     with st.container(border=True):
         st.caption("Выберите участника для проверки")
@@ -209,16 +242,16 @@ with table_col:
             table_event = None
         else:
             table_event = st.dataframe(
-                priority[["rank", "gid_display", "role_display", "priority_score"]],
+                priority[["gid_display", "rationale", "role_display", "priority_score"]],
                 width="stretch",
-                height=356,
+                height=420,
                 hide_index=True,
                 on_select="rerun",
                 selection_mode="single-row",
                 key="priority_table",
                 column_config={
-                    "rank": st.column_config.NumberColumn("№", width="small", format="%d"),
                     "gid_display": st.column_config.TextColumn("gid", width="medium", pinned=True),
+                    "rationale": st.column_config.TextColumn("Обоснование", width="large"),
                     "role_display": st.column_config.TextColumn("Роль", width="medium"),
                     "priority_score": st.column_config.ProgressColumn(
                         "Приоритет", min_value=0.0, max_value=1.0, format="%.2f"
@@ -230,9 +263,23 @@ with table_col:
 
 st.session_state["selected_gid"] = selected_gid
 node = nodes[nodes["gid"] == selected_gid].iloc[0]
+node_rationale = analyst_rationale(node)
+stored_review_cases = st.session_state.setdefault("review_cases", {})
+valid_gids = set(nodes["gid"].astype(int))
+review_cases = {
+    int(review_gid): review_route
+    for review_gid, review_route in stored_review_cases.items()
+    if int(review_gid) in valid_gids
+}
+st.session_state["review_cases"] = review_cases
+review_routes = [
+    "Углублённая проверка",
+    "Запрос в правоохранительные органы",
+    "Проверка и запрос",
+]
 
 with card_col:
-    with st.container(border=True, height=393):
+    with st.container(border=True):
         title_row = st.container(horizontal=True, horizontal_alignment="distribute")
         with title_row:
             st.subheader(str(selected_gid))
@@ -244,9 +291,79 @@ with card_col:
             st.metric("Приоритет", f"{float(node['priority_score']):.2f}")
             st.metric("Глубина", int(node["depth"]))
         st.markdown("**Основание для проверки**")
-        st.write(node["evidence"])
+        st.write(node_rationale)
+        st.caption(node["evidence"])
         if bool(node["truncated_by_depth"]):
             st.warning("Данные заканчиваются на глубине 4. Следующие переводы не видны.")
+        current_route = review_cases.get(selected_gid, review_routes[0])
+        route = st.selectbox(
+            "Решение аналитика",
+            review_routes,
+            index=review_routes.index(current_route),
+            key=f"review_route_{selected_gid}",
+        )
+        if st.button(
+            "Обновить решение" if selected_gid in review_cases else "Добавить в перечень",
+            icon=":material/playlist_add_check:",
+            type="primary",
+            width="stretch",
+        ):
+            review_cases[selected_gid] = route
+            st.session_state["review_cases"] = review_cases
+            st.toast("Решение сохранено", icon=":material/check_circle:")
+
+st.subheader("Перечень для дальнейших действий")
+if not review_cases:
+    st.info("Выберите участника, укажите решение и добавьте его в перечень.")
+else:
+    review_rows = []
+    for review_gid, review_route in review_cases.items():
+        review_node = nodes[nodes["gid"] == int(review_gid)].iloc[0]
+        review_rows.append(
+            {
+                "gid": str(int(review_gid)),
+                "role": ROLE_LABELS.get(str(review_node["role"]), str(review_node["role"])),
+                "priority": float(review_node["priority_score"]),
+                "route": review_route,
+                "rationale": analyst_rationale(review_node),
+                "cluster": int(review_node["cluster_id"]),
+            }
+        )
+    review_df = pd.DataFrame(review_rows).sort_values("priority", ascending=False)
+    st.dataframe(
+        review_df[["gid", "rationale", "route", "priority", "role", "cluster"]],
+        width="stretch",
+        hide_index=True,
+        column_config={
+            "gid": st.column_config.TextColumn("gid", pinned=True),
+            "role": st.column_config.TextColumn("Роль"),
+            "priority": st.column_config.ProgressColumn(
+                "Приоритет", min_value=0.0, max_value=1.0, format="%.2f"
+            ),
+            "route": st.column_config.TextColumn("Решение", width="medium"),
+            "rationale": st.column_config.TextColumn("Обоснование", width="large"),
+            "cluster": st.column_config.NumberColumn("Кластер", format="%d"),
+        },
+    )
+    actions = st.container(horizontal=True, vertical_alignment="bottom")
+    with actions:
+        remove_gids = st.multiselect(
+            "Исключить из перечня",
+            review_df["gid"].tolist(),
+            placeholder="Выберите gid",
+        )
+        if st.button("Исключить", icon=":material/remove_circle:", disabled=not remove_gids):
+            for remove_gid in remove_gids:
+                review_cases.pop(int(remove_gid), None)
+            st.session_state["review_cases"] = review_cases
+            st.rerun()
+        st.download_button(
+            "Скачать перечень CSV",
+            data=review_df.to_csv(index=False).encode("utf-8-sig"),
+            file_name="review_candidates.csv",
+            mime="text/csv",
+            icon=":material/download:",
+        )
 
 st.subheader("Анализ участника")
 view_mode = st.segmented_control(
