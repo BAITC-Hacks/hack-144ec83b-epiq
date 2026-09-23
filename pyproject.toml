@@ -17,6 +17,9 @@ dependencies = [
   "pyarrow>=14",
   "packaging>=23",
   "pyvis>=0.3.2,<1",
+  "openai>=2,<3",
+  "jsonschema>=4,<5",
+  "toml>=0.10,<1",
 ]
 
 [project.scripts]

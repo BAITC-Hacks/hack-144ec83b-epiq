@@ -16,6 +16,8 @@ sys.path.insert(0, str(ROOT / "src"))
 
 from money_graph.investigation_ui import show_common_recipients, show_repeated_routes
 from money_graph.scoring import PRIORITY_LABELS, priority_components
+from money_graph.assistant_tools import GraphTools
+from money_graph.assistant_ui import render_assistant
 
 ROLE_LABELS = {
     "coordinator": "Координатор",
@@ -687,44 +689,11 @@ else:
             icon=":material/download:",
         )
 
-with st.expander("Ассистент аналитика", icon=":material/psychology:"):
-    st.caption(
-        "Локальный интерпретатор запросов. Примеры: «кто собирает деньги», "
-        "«покажи быстрый транзит», «кто стоит выше», «аномальные узлы»."
-    )
-    assistant_query = st.text_input(
-        "Вопрос по графу",
-        placeholder="Кто собирает деньги от нескольких seed?",
-        key="assistant_query",
-    )
-    if assistant_query.strip():
-        assistant_answer, assistant_nodes = answer_analyst_query(assistant_query, nodes)
-        st.write(assistant_answer)
-        if not assistant_nodes.empty:
-            assistant_view = assistant_nodes.copy()
-            assistant_view["gid"] = assistant_view["gid"].astype(str)
-            assistant_view["role_display"] = assistant_view["role"].map(ROLE_LABELS)
-            assistant_view["rationale"] = assistant_view.apply(analyst_rationale, axis=1)
-            assistant_columns = ["gid", "role_display", "priority_score"]
-            if "anomaly_score" in assistant_view:
-                assistant_columns.append("anomaly_score")
-            assistant_columns.append("rationale")
-            st.dataframe(
-                assistant_view[assistant_columns],
-                width="stretch",
-                hide_index=True,
-                column_config={
-                    "gid": st.column_config.TextColumn("gid", pinned=True),
-                    "role_display": st.column_config.TextColumn("Роль"),
-                    "priority_score": st.column_config.ProgressColumn(
-                        "Приоритет", min_value=0.0, max_value=1.0, format="%.2f"
-                    ),
-                    "anomaly_score": st.column_config.ProgressColumn(
-                        "Аномальность", min_value=0.0, max_value=1.0, format="%.2f"
-                    ),
-                    "rationale": st.column_config.TextColumn("Обоснование", width="large"),
-                },
-            )
+render_assistant(
+    ROOT, GraphTools(nodes, edges, transactions, repeats, episodes), selected_gid,
+    (str(Path(out_dir).resolve()), (Path(out_dir) / "run_manifest.json").stat().st_mtime_ns),
+    ROLE_LABELS, answer_analyst_query, analyst_rationale,
+)
 
 st.subheader("Анализ участника")
 view_mode = st.segmented_control(
