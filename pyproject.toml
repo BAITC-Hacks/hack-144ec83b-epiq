@@ -1,0 +1,32 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "money-graph-epiq"
+version = "0.1.0"
+description = "Explainable transaction graph analysis for HackAlem AI"
+requires-python = ">=3.10"
+dependencies = [
+  "pandas>=2.0,<3",
+  "numpy>=1.24,<3",
+  "duckdb>=1.1,<2",
+  "networkx>=3.2,<4",
+  "scipy>=1.11,<2",
+  "streamlit>=1.39,<2",
+  "pyvis>=0.3.2,<1",
+]
+
+[project.scripts]
+money-graph = "money_graph.cli:main"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]
+
