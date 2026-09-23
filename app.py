@@ -31,12 +31,12 @@ ROLE_COLORS = {
     "peripheral": "gray",
 }
 GRAPH_COLORS = {
-    "coordinator": "#7C3AED",
-    "consolidator": "#2563EB",
-    "distributor": "#EA580C",
-    "transit": "#0891B2",
-    "terminal": "#16A34A",
-    "peripheral": "#64748B",
+    "coordinator": "#B9A2F4",
+    "consolidator": "#8CABD9",
+    "distributor": "#D9AD89",
+    "transit": "#83BDB7",
+    "terminal": "#A6BC94",
+    "peripheral": "#9295A5",
 }
 
 
@@ -247,15 +247,21 @@ def render_neighborhood(
     edge_limit: int = 12,
 ) -> None:
     from pyvis.network import Network
+    import networkx as nx
 
     neighborhood = select_graph_neighborhood(edges, selected_gid, radius, edge_limit)
     visible_gids = {selected_gid} | set(neighborhood["src"].astype(int)) | set(
         neighborhood["dst"].astype(int)
     )
     visible_nodes = nodes[nodes["gid"].isin(visible_gids)]
-    is_dark = st.context.theme.type == "dark"
-    background = "#0B1120" if is_dark else "#F4F5F7"
-    font_color = "#E5E7EB" if is_dark else "#17211F"
+    background = "#19191F"
+    font_color = "#B8B7C6"
+    layout_graph = nx.Graph()
+    layout_graph.add_nodes_from(sorted(visible_gids))
+    layout_graph.add_edges_from(
+        (int(row.src), int(row.dst)) for row in neighborhood.itertuples(index=False)
+    )
+    positions = nx.spring_layout(layout_graph, seed=42, iterations=100, scale=300)
 
     network = Network(
         height="570px",
@@ -282,67 +288,66 @@ def render_neighborhood(
             ),
             color={
                 "background": node_color,
-                "border": "#111827" if is_selected else node_color,
-                "highlight": {"background": node_color, "border": "#111827"},
+                "border": "#EEE8FF" if is_selected else background,
+                "highlight": {"background": "#E1D5FF", "border": "#F6F2FF"},
+                "hover": {"background": node_color, "border": "#E1D5FF"},
             },
-            size=30 if is_selected else 12 + 14 * float(row.priority_score),
-            shape="diamond" if bool(row.is_seed) else "dot",
-            borderWidth=4 if is_selected else 1,
-            level=int(row.depth),
+            size=15 if is_selected else 5 + 7 * float(row.priority_score),
+            shape="dot",
+            borderWidth=2 if is_selected or bool(row.is_seed) else 0,
+            x=float(positions[int(row.gid)][0]),
+            y=float(positions[int(row.gid)][1]),
+            shadow={"enabled": is_selected, "color": "rgba(185,162,244,0.25)",
+                    "size": 22, "x": 0, "y": 0},
         )
     max_amount = max(float(neighborhood["sum_kzt"].max()), 1.0)
     for row in neighborhood.itertuples(index=False):
-        if int(row.dst) == selected_gid:
-            edge_color = "#2563EB"
-        elif int(row.src) == selected_gid:
-            edge_color = "#EA580C"
-        else:
-            edge_color = "#82938F" if not is_dark else "#64748B"
+        edge_color = "#626072" if selected_gid in (int(row.src), int(row.dst)) else "#42424E"
         relative_width = math.log10(float(row.sum_kzt) + 1) / math.log10(max_amount + 1)
         network.add_edge(
             str(int(row.src)),
             str(int(row.dst)),
-            width=1.0 + 4.0 * relative_width,
+            width=0.4 + 1.1 * relative_width,
             title=f"{float(row.sum_kzt):,.0f} ₸ · {int(row.n_tx)} операций",
             arrows="to",
-            color={"color": edge_color, "highlight": edge_color, "opacity": 0.78},
+            color={"color": edge_color, "highlight": "#C4B1EF", "hover": "#C4B1EF", "opacity": 0.7},
         )
     network.set_options(json.dumps({
-        "layout": {
-            "hierarchical": {
-                "enabled": True,
-                "direction": "LR",
-                "sortMethod": "directed",
-                "levelSeparation": 220,
-                "nodeSpacing": 28,
-                "treeSpacing": 70,
-                "blockShifting": True,
-                "edgeMinimization": True,
-            }
-        },
+        "layout": {"improvedLayout": False},
         "interaction": {
             "hover": True,
             "navigationButtons": False,
             "keyboard": True,
             "tooltipDelay": 120,
+            "hoverConnectedEdges": True,
+            "selectConnectedEdges": True,
         },
         "physics": {"enabled": False},
         "edges": {
             "arrowStrikethrough": False,
-            "smooth": {"enabled": True, "type": "cubicBezier", "roundness": 0.34},
-            "arrows": {"to": {"enabled": True, "scaleFactor": 0.55}},
+            "smooth": {"enabled": True, "type": "continuous", "roundness": 0.12},
+            "arrows": {"to": {"enabled": True, "scaleFactor": 0.28}},
         },
         "nodes": {
             "font": {
-                "size": 12,
+                "size": 11,
                 "face": "Inter, Arial",
                 "color": font_color,
-                "strokeWidth": 3,
+                "strokeWidth": 2,
                 "strokeColor": background,
             }
         },
     }))
-    st.iframe(network.generate_html(), width="stretch", height=590)
+    graph_html = network.generate_html().replace(
+        "</head>",
+        "<style>html,body{margin:0;background:#19191F;}"
+        ".card{border:0!important;background:transparent!important;}"
+        "#mynetwork{border:0!important;border-radius:14px;}"
+        "div.vis-tooltip{background:#292832;color:#EEEAF6;border:1px solid #514C63;"
+        "border-radius:8px;padding:12px;font:12px sans-serif;max-width:320px;white-space:normal;}"
+        "</style></head>",
+    )
+    st.iframe(graph_html, width="stretch", height=590)
 
 
 def render_role_badge(role: str) -> None:
@@ -701,24 +706,27 @@ if view_mode == "network":
             graph_radius = st.segmented_control(
                 "Окружение",
                 [1, 2],
-                default=1,
+                default=2,
                 format_func=lambda value: f"{value} колено" if value == 1 else f"{value} колена",
                 help="Второе колено раскрывает контрагентов соседних узлов.",
             )
             graph_edge_limit = st.select_slider(
                 "Максимум связей",
                 options=[12, 20, 40, 60],
-                value=12,
+                value=40,
                 help="Показываются крупнейшие связи на каждом шаге от выбранного узла.",
             )
         st.caption(
-            "Слева направо — колена сети · синий поток входит в выбранный узел · "
-            "оранжевый выходит · цвет узла показывает роль · размер показывает приоритет"
+            "Цвет — роль · размер — приоритет · светлый контур — выбранный участник. "
+            "Стрелки показывают направление денег. Нажмите на узел для выделения связей; "
+            "колесо — масштаб, перетаскивание — перемещение."
         )
         legend = st.container(horizontal=True, vertical_alignment="center")
         with legend:
-            for role in ("coordinator", "consolidator", "distributor", "transit", "terminal"):
-                render_role_badge(role)
+            st.html("<div style='display:flex;flex-wrap:wrap;gap:16px;background:#19191F;"
+                    "color:#D2CEDD;padding:12px 16px;border-radius:10px;font-size:12px'>"
+                    + "".join(f"<span><span style='color:{color}'>●</span> {ROLE_LABELS[role]}</span>"
+                              for role, color in GRAPH_COLORS.items()) + "</div>")
         if neighborhood.empty:
             st.info("У участника нет наблюдаемых связей в выгрузке.")
         else:
