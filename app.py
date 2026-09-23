@@ -285,10 +285,10 @@ def render_neighborhood(
             gid_text,
             label=f"{role_name}\n{compact_label}" if is_selected else compact_label,
             title=(
-                f"gid: {int(row.gid)}<br>Роль: {role_name}<br>"
-                f"Колено: {int(row.depth)}<br>Приоритет: {row.priority_score:.2f}<br>"
-                f"Входящий поток: {float(row.in_kzt):,.0f} ₸<br>"
-                f"Исходящий поток: {float(row.out_kzt):,.0f} ₸<br>{row.evidence}"
+                f"gid: {int(row.gid)}\nРоль: {role_name}\n"
+                f"Колено: {int(row.depth)}\nПриоритет: {row.priority_score:.2f}\n"
+                f"Входящий поток: {float(row.in_kzt):,.0f} ₸\n"
+                f"Исходящий поток: {float(row.out_kzt):,.0f} ₸\n{row.evidence}"
             ),
             color={
                 "background": node_color,
