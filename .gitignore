@@ -2,8 +2,10 @@ __pycache__/
 *.py[cod]
 .venv/
 .pytest_cache/
-.streamlit/
+.streamlit/secrets.toml
 data/
 out/
 *.parquet
+__MACOSX/
+*.egg-info/
 
