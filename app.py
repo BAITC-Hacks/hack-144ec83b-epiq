@@ -254,7 +254,7 @@ def render_neighborhood(
     )
     visible_nodes = nodes[nodes["gid"].isin(visible_gids)]
     is_dark = st.context.theme.type == "dark"
-    background = "#0B1120" if is_dark else "#F8F7F2"
+    background = "#0B1120" if is_dark else "#F4F5F7"
     font_color = "#E5E7EB" if is_dark else "#17211F"
 
     network = Network(
@@ -357,8 +357,8 @@ st.set_page_config(
 )
 
 with st.sidebar:
-    st.title("Граф денег")
-    st.caption("Контур финансового анализа")
+    st.markdown("### :green[:material/account_tree:] Граф денег")
+    st.caption("Кейс Freedom · прототип HackAlem")
     st.divider()
     gid_value = st.text_input(
         "Найти участника",
@@ -385,11 +385,23 @@ try:
 except FileNotFoundError:
     st.error("Результаты анализа не найдены", icon=":material/folder_off:")
     st.info("Запустите расчётный пайплайн, затем укажите папку результатов в боковой панели.")
-    st.code("python -m money_graph.pipeline --data-dir data --out-dir out", language="powershell")
+    st.code("python -m money_graph.cli --data data --out out", language="powershell")
     st.stop()
 
 role_options = sorted(nodes["role"].dropna().unique())
+investigation_scenarios = {
+    "Общий приоритет": ([], "Все кандидаты с учётом выбранных фильтров."),
+    "Кто собирает деньги": (["Сбор средств", "Несколько seed"],
+                           "Ищем точки сбора и участников, связанных с несколькими исходными клиентами."),
+    "Куда деньги уходят дальше": (["Быстрый транзит", "Веерные переводы"],
+                                 "Ищем быстрый выход и распределение; проверяем даты в разделе «Маршруты»."),
+    "Где обрывается след": (["Обрыв depth=4"],
+                           "Выбираем пограничные узлы, для которых нужен следующий запрос данных."),
+}
 with st.sidebar:
+    scenario = st.selectbox("Сценарий проверки", list(investigation_scenarios))
+    scenario_signals, scenario_description = investigation_scenarios[scenario]
+    st.caption(scenario_description)
     selected_roles = st.pills(
         "Роли",
         role_options,
@@ -422,10 +434,10 @@ with st.sidebar:
 header = st.container(horizontal=True, horizontal_alignment="distribute", vertical_alignment="center")
 with header:
     with st.container():
-        st.caption("АНАЛИТИЧЕСКИЙ КОНТУР · ГЛУБИНА 4")
-        st.title("Транзакционная сеть")
-        st.caption("Роли, потоки и связи участников")
-    st.badge("Расчёт готов", icon=":material/check_circle:", color="green")
+        st.caption("FREEDOM · КЕЙС HACKALEM · AML-АНАЛИТИКА")
+        st.title("От перевода — к цепочке")
+        st.caption("Найдите точку сбора, проверьте путь денег и подготовьте следующий запрос.")
+    st.badge("4 колена · локальный анализ", icon=":material/account_tree:", color="green")
 
 metrics = st.container(border=True, horizontal=True, horizontal_alignment="distribute")
 with metrics:
@@ -451,6 +463,13 @@ if selected_signals:
             lambda values: any(signal in values for signal in selected_signals)
         )
     ]
+if scenario_signals:
+    priority = priority[
+        priority["signal_list"].apply(
+            lambda values: any(signal in values for signal in scenario_signals)
+        )
+    ]
+matched_count = len(priority)
 priority = priority.head(200)
 priority["gid_display"] = priority["gid"].astype(str)
 priority["role_display"] = priority["role"].map(ROLE_LABELS).fillna(priority["role"])
@@ -482,9 +501,9 @@ if query_error:
 table_col, card_col = st.columns([1.75, 1], gap="large")
 with table_col:
     with st.container(border=True):
-        st.caption(f"Найдено кандидатов: {len(priority)} · выберите участника для проверки")
+        st.caption(f"Найдено: {matched_count} · показано: {len(priority)} · выберите участника")
         if priority.empty:
-            st.info("По выбранным ролям нет участников.")
+            st.info("Нет участников по этим условиям. Измените сценарий, роли или минимальный приоритет.")
             table_event = None
         else:
             table_event = st.dataframe(
