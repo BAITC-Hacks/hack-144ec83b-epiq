@@ -8,18 +8,25 @@
 
 ## Быстрый запуск
 
-Требуется Python 3.10 или новее.
+Требуется Python 3.10 или новее. Распакуйте выданные организаторами файлы
+`nodes.parquet`, `edges.parquet`, `transactions.parquet` в папку `data`.
+Данные не включены в Git. В терминале из папки репозитория выполните:
 
 ```bash
-python -m venv .venv
-# Windows: .venv\Scripts\activate
-# Linux/macOS: source .venv/bin/activate
-pip install -e .
-money-graph --data ./data --out ./out
-streamlit run app.py
+python run.py
 ```
 
-В папке `data` должны находиться `nodes.parquet`, `edges.parquet` и `transactions.parquet`.
+Команда создаёт `.venv`, устанавливает недостающие зависимости, проверяет данные,
+рассчитывает CSV и запускает сайт на http://localhost:8501. Активация окружения
+не нужна. Первая установка требует интернета; время загрузки зависимостей не входит
+во время расчёта. Повторный запуск использует установленные пакеты. Остановка — Ctrl+C.
+
+Только расчёт для проверяющего: `python run.py --no-ui`.
+Другой каталог данных: `python run.py --data "C:/path/to/data"`.
+Если порт занят: `python run.py --port 8502`.
+На Linux/macOS при необходимости используйте `python3` вместо `python`.
+Для разработки можно установить пакет через `pip install -e .` и использовать
+`money-graph --data data --out out` напрямую.
 
 ## Сценарий аналитика
 
