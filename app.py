@@ -3,6 +3,7 @@ from __future__ import annotations
 import math
 import os
 import sys
+from collections import deque
 from pathlib import Path
 
 import pandas as pd
@@ -38,13 +39,22 @@ GRAPH_COLORS = {
 
 
 @st.cache_data(max_entries=4)
-def load_results(out_dir: str) -> tuple[pd.DataFrame, ...]:
+def load_results(out_dir: str, data_dir: str) -> tuple[pd.DataFrame, ...]:
     root = Path(out_dir)
+    transactions_path = Path(data_dir) / "transactions.parquet"
+    transactions = (
+        pd.read_parquet(transactions_path)
+        if transactions_path.exists()
+        else pd.DataFrame(columns=["src", "dst", "date", "sum_kzt"])
+    )
+    if not transactions.empty:
+        transactions["date"] = pd.to_datetime(transactions["date"])
     return (
         pd.read_csv(root / "node_features.csv"),
         pd.read_csv(root / "edges.csv"),
         pd.read_csv(root / "clusters.csv"),
         pd.read_csv(root / "top_nodes.csv"),
+        transactions,
     )
 
 
@@ -88,6 +98,59 @@ def analyst_rationale(row: pd.Series) -> str:
             "или не попал в наблюдаемый фрагмент."
         )
     return "Наблюдаемых входящих и исходящих переводов нет."
+
+
+def risk_signals(row: pd.Series, turnover_cutoff: float) -> list[str]:
+    signals = []
+    if int(row["in_deg"]) >= 5:
+        signals.append("Сбор средств")
+    if int(row["out_deg"]) >= 10:
+        signals.append("Веерные переводы")
+    if 0.8 <= float(row["pass_through"]) <= 1.2 and int(row["in_tx"]) > 0:
+        signals.append("Транзит")
+    if int(row["seed_reach"]) >= 2:
+        signals.append("Несколько seed")
+    if float(row["in_kzt"]) + float(row["out_kzt"]) >= turnover_cutoff:
+        signals.append("Высокий оборот")
+    if bool(row["truncated_by_depth"]):
+        signals.append("Обрыв depth=4")
+    return signals
+
+
+def trace_from_seed(nodes: pd.DataFrame, edges: pd.DataFrame, target_gid: int) -> list[int]:
+    seeds = set(nodes.loc[nodes["is_seed"].astype(bool), "gid"].astype(int))
+    if target_gid in seeds:
+        return [target_gid]
+
+    incoming: dict[int, list[tuple[int, float]]] = {}
+    for edge in edges.itertuples(index=False):
+        incoming.setdefault(int(edge.dst), []).append((int(edge.src), float(edge.sum_kzt)))
+    for predecessors in incoming.values():
+        predecessors.sort(key=lambda item: item[1], reverse=True)
+
+    queue = deque([target_gid])
+    next_node: dict[int, int | None] = {target_gid: None}
+    found_seed = None
+    while queue and found_seed is None:
+        current = queue.popleft()
+        for predecessor, _ in incoming.get(current, []):
+            if predecessor in next_node:
+                continue
+            next_node[predecessor] = current
+            if predecessor in seeds:
+                found_seed = predecessor
+                break
+            queue.append(predecessor)
+
+    if found_seed is None:
+        return []
+    path = [found_seed]
+    while path[-1] != target_gid:
+        successor = next_node[path[-1]]
+        if successor is None:
+            break
+        path.append(successor)
+    return path
 
 
 def render_neighborhood(nodes: pd.DataFrame, edges: pd.DataFrame, selected_gid: int) -> None:
@@ -168,9 +231,14 @@ with st.sidebar:
             os.getenv("MONEY_GRAPH_OUT", "out"),
             help="Каталог с результатами расчётного пайплайна.",
         )
+        data_dir = st.text_input(
+            "Папка исходных данных",
+            os.getenv("MONEY_GRAPH_DATA", "data"),
+            help="Каталог с transactions.parquet для просмотра истории операций.",
+        )
 
 try:
-    nodes, edges, clusters, top = load_results(out_dir)
+    nodes, edges, clusters, top, transactions = load_results(out_dir, data_dir)
 except FileNotFoundError:
     st.error("Результаты анализа не найдены", icon=":material/folder_off:")
     st.info("Запустите расчётный пайплайн, затем укажите папку результатов в боковой панели.")
@@ -186,6 +254,20 @@ with st.sidebar:
         format_func=lambda role: ROLE_LABELS.get(role, role),
         selection_mode="multi",
         wrap=True,
+    )
+    min_priority = st.slider(
+        "Минимальный приоритет",
+        min_value=0.0,
+        max_value=1.0,
+        value=0.35,
+        step=0.05,
+    )
+    selected_signals = st.pills(
+        "Подозрительная активность",
+        ["Сбор средств", "Веерные переводы", "Транзит", "Несколько seed", "Высокий оборот"],
+        selection_mode="multi",
+        wrap=True,
+        help="При нескольких вариантах достаточно совпадения хотя бы с одним сигналом.",
     )
     st.divider()
     st.caption("Система предлагает гипотезы. Решение принимает аналитик.")
@@ -206,9 +288,26 @@ with metrics:
     st.metric("Оборот", compact_number(edges["sum_kzt"].sum(), "₸"), border=False)
 
 active_roles = selected_roles or role_options
-priority = top[top["role"].isin(active_roles)].copy()
+turnover_cutoff = float((nodes["in_kzt"] + nodes["out_kzt"]).quantile(0.9))
+ranked_nodes = nodes.sort_values("priority_score", ascending=False).copy()
+ranked_nodes["rank"] = range(1, len(ranked_nodes) + 1)
+ranked_nodes["signal_list"] = ranked_nodes.apply(
+    lambda row: risk_signals(row, turnover_cutoff), axis=1
+)
+priority = ranked_nodes[
+    ranked_nodes["role"].isin(active_roles)
+    & (ranked_nodes["priority_score"] >= min_priority)
+].copy()
+if selected_signals:
+    priority = priority[
+        priority["signal_list"].apply(
+            lambda values: any(signal in values for signal in selected_signals)
+        )
+    ]
+priority = priority.head(200)
 priority["gid_display"] = priority["gid"].astype(str)
 priority["role_display"] = priority["role"].map(ROLE_LABELS).fillna(priority["role"])
+priority["signals_display"] = priority["signal_list"].apply(lambda values: " · ".join(values))
 rationale_by_gid = {
     int(row["gid"]): analyst_rationale(row) for _, row in nodes.iterrows()
 }
@@ -236,13 +335,13 @@ if query_error:
 table_col, card_col = st.columns([1.75, 1], gap="large")
 with table_col:
     with st.container(border=True):
-        st.caption("Выберите участника для проверки")
+        st.caption(f"Найдено кандидатов: {len(priority)} · выберите участника для проверки")
         if priority.empty:
             st.info("По выбранным ролям нет участников.")
             table_event = None
         else:
             table_event = st.dataframe(
-                priority[["gid_display", "rationale", "role_display", "priority_score"]],
+                priority[["gid_display", "rationale", "signals_display", "priority_score"]],
                 width="stretch",
                 height=420,
                 hide_index=True,
@@ -252,7 +351,7 @@ with table_col:
                 column_config={
                     "gid_display": st.column_config.TextColumn("gid", width="medium", pinned=True),
                     "rationale": st.column_config.TextColumn("Обоснование", width="large"),
-                    "role_display": st.column_config.TextColumn("Роль", width="medium"),
+                    "signals_display": st.column_config.TextColumn("Сигналы", width="medium"),
                     "priority_score": st.column_config.ProgressColumn(
                         "Приоритет", min_value=0.0, max_value=1.0, format="%.2f"
                     ),
@@ -264,6 +363,7 @@ with table_col:
 st.session_state["selected_gid"] = selected_gid
 node = nodes[nodes["gid"] == selected_gid].iloc[0]
 node_rationale = analyst_rationale(node)
+node_signals = risk_signals(node, turnover_cutoff)
 stored_review_cases = st.session_state.setdefault("review_cases", {})
 valid_gids = set(nodes["gid"].astype(int))
 review_cases = {
@@ -292,6 +392,7 @@ with card_col:
             st.metric("Глубина", int(node["depth"]))
         st.markdown("**Основание для проверки**")
         st.write(node_rationale)
+        st.caption("Сигналы: " + (" · ".join(node_signals) if node_signals else "не выявлены"))
         st.caption(node["evidence"])
         if bool(node["truncated_by_depth"]):
             st.warning("Данные заканчиваются на глубине 4. Следующие переводы не видны.")
@@ -368,10 +469,12 @@ else:
 st.subheader("Анализ участника")
 view_mode = st.segmented_control(
     "Представление",
-    ["network", "links", "clusters"],
+    ["network", "trace", "transactions", "links", "clusters"],
     default="network",
     format_func=lambda value: {
         "network": "Сеть",
+        "trace": "След денег",
+        "transactions": "Операции",
         "links": "Связи",
         "clusters": "Кластеры",
     }[value],
@@ -391,6 +494,119 @@ if view_mode == "network":
             st.info("У участника нет наблюдаемых связей в выгрузке.")
         else:
             render_neighborhood(nodes, edges, selected_gid)
+
+elif view_mode == "trace":
+    trace_path = trace_from_seed(nodes, edges, selected_gid)
+    if not trace_path:
+        st.info("Путь от известного seed до этого участника не найден.")
+    elif len(trace_path) == 1:
+        st.info("Выбранный участник сам является исходным seed.")
+    else:
+        st.caption(
+            f"Кратчайший наблюдаемый путь от seed: {len(trace_path) - 1} переводов. "
+            "При равной длине выбран путь с более крупными связями."
+        )
+        st.markdown(" → ".join(f"`{gid}`" for gid in trace_path))
+
+        path_nodes = nodes.set_index("gid").loc[trace_path].reset_index()
+        path_nodes["gid"] = path_nodes["gid"].astype(str)
+        path_nodes["role_display"] = path_nodes["role"].map(ROLE_LABELS).fillna(path_nodes["role"])
+        path_nodes["rationale"] = path_nodes.apply(analyst_rationale, axis=1)
+        path_nodes["step"] = range(len(path_nodes))
+        st.markdown("**Узлы цепочки**")
+        st.dataframe(
+            path_nodes[["step", "gid", "depth", "role_display", "priority_score", "rationale"]],
+            width="stretch",
+            hide_index=True,
+            column_config={
+                "step": st.column_config.NumberColumn("Шаг", format="%d", width="small"),
+                "gid": st.column_config.TextColumn("gid", pinned=True),
+                "depth": st.column_config.NumberColumn("Колено", format="%d", width="small"),
+                "role_display": st.column_config.TextColumn("Роль"),
+                "priority_score": st.column_config.ProgressColumn(
+                    "Приоритет", min_value=0.0, max_value=1.0, format="%.2f"
+                ),
+                "rationale": st.column_config.TextColumn("Обоснование", width="large"),
+            },
+        )
+
+        path_edges = []
+        for step, (source, target) in enumerate(zip(trace_path, trace_path[1:]), start=1):
+            edge = edges[(edges["src"] == source) & (edges["dst"] == target)].iloc[0]
+            path_edges.append(
+                {
+                    "step": step,
+                    "src": str(source),
+                    "dst": str(target),
+                    "sum_kzt": float(edge["sum_kzt"]),
+                    "n_tx": int(edge["n_tx"]),
+                }
+            )
+        st.markdown("**Переводы по пути**")
+        st.dataframe(
+            pd.DataFrame(path_edges),
+            width="stretch",
+            hide_index=True,
+            column_config={
+                "step": st.column_config.NumberColumn("Шаг", format="%d", width="small"),
+                "src": st.column_config.TextColumn("Отправитель"),
+                "dst": st.column_config.TextColumn("Получатель"),
+                "sum_kzt": st.column_config.NumberColumn("Сумма", format="localized"),
+                "n_tx": st.column_config.NumberColumn("Операций", format="%d"),
+            },
+        )
+
+elif view_mode == "transactions":
+    history = transactions[
+        (transactions["src"] == selected_gid) | (transactions["dst"] == selected_gid)
+    ].copy()
+    if history.empty:
+        st.info("История операций недоступна или для участника нет транзакций.")
+    else:
+        history["direction"] = history["src"].apply(
+            lambda source: "Исходящий" if int(source) == selected_gid else "Входящий"
+        )
+        history["counterparty"] = history.apply(
+            lambda row: str(int(row["dst"]))
+            if int(row["src"]) == selected_gid
+            else str(int(row["src"])),
+            axis=1,
+        )
+        incoming_history = history[history["direction"] == "Входящий"]
+        outgoing_history = history[history["direction"] == "Исходящий"]
+        history_metrics = st.container(horizontal=True, horizontal_alignment="distribute")
+        with history_metrics:
+            st.metric(
+                "Входящих",
+                f"{len(incoming_history)} / {compact_number(incoming_history['sum_kzt'].sum(), '₸')}",
+            )
+            st.metric(
+                "Исходящих",
+                f"{len(outgoing_history)} / {compact_number(outgoing_history['sum_kzt'].sum(), '₸')}",
+            )
+            st.metric("Контрагентов", history["counterparty"].nunique())
+
+        incoming_dates = set(incoming_history["date"].dt.date)
+        outgoing_dates = set(outgoing_history["date"].dt.date)
+        same_day_dates = sorted(incoming_dates & outgoing_dates)
+        if same_day_dates:
+            st.warning(
+                f"В {len(same_day_dates)} днях зафиксированы входящие и исходящие операции "
+                "в один день. Проверьте возможный сквозной транзит."
+            )
+
+        history = history.sort_values(["date", "sum_kzt"], ascending=[False, False])
+        st.dataframe(
+            history[["date", "direction", "counterparty", "sum_kzt"]],
+            width="stretch",
+            hide_index=True,
+            column_config={
+                "date": st.column_config.DateColumn("Дата", format="DD.MM.YYYY"),
+                "direction": st.column_config.TextColumn("Направление"),
+                "counterparty": st.column_config.TextColumn("Контрагент", pinned=True),
+                "sum_kzt": st.column_config.NumberColumn("Сумма", format="localized"),
+            },
+        )
 
 elif view_mode == "links":
     if neighborhood.empty:
