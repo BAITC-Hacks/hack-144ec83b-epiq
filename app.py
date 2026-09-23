@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import json
 import math
 import os
+import re
 import sys
 from collections import deque
 from pathlib import Path
@@ -49,12 +51,16 @@ def load_results(out_dir: str, data_dir: str) -> tuple[pd.DataFrame, ...]:
     )
     if not transactions.empty:
         transactions["date"] = pd.to_datetime(transactions["date"])
+    resilience_path = root / "resilience.csv"
+    route_patterns_path = root / "route_patterns.csv"
     return (
         pd.read_csv(root / "node_features.csv"),
         pd.read_csv(root / "edges.csv"),
         pd.read_csv(root / "clusters.csv"),
         pd.read_csv(root / "top_nodes.csv"),
         transactions,
+        pd.read_csv(resilience_path) if resilience_path.exists() else pd.DataFrame(),
+        pd.read_csv(route_patterns_path) if route_patterns_path.exists() else pd.DataFrame(),
     )
 
 
@@ -112,6 +118,16 @@ def risk_signals(row: pd.Series, turnover_cutoff: float) -> list[str]:
         signals.append("Несколько seed")
     if float(row["in_kzt"]) + float(row["out_kzt"]) >= turnover_cutoff:
         signals.append("Высокий оборот")
+    if float(row.get("anomaly_score", 0)) >= 0.8:
+        signals.append("Аномалия колена")
+    if int(row.get("rapid_flow_days", 0)) > 0:
+        signals.append("Быстрый транзит")
+    if int(row.get("cycle_size", 0)) > 0:
+        signals.append("Цикл")
+    if int(row.get("max_same_day_payers", 0)) >= 3:
+        signals.append("Синхронные плательщики")
+    if float(row.get("incoming_spike_ratio", 0)) >= 3:
+        signals.append("Всплеск активности")
     if bool(row["truncated_by_depth"]):
         signals.append("Обрыв depth=4")
     return signals
@@ -153,55 +169,180 @@ def trace_from_seed(nodes: pd.DataFrame, edges: pd.DataFrame, target_gid: int) -
     return path
 
 
-def render_neighborhood(nodes: pd.DataFrame, edges: pd.DataFrame, selected_gid: int) -> None:
+def answer_analyst_query(query: str, nodes: pd.DataFrame) -> tuple[str, pd.DataFrame]:
+    """Interpret a small set of investigation questions without an external API."""
+    normalized = query.lower().strip()
+    gid_match = re.search(r"\d{12,}", normalized)
+    if gid_match:
+        gid = int(gid_match.group())
+        result = nodes[nodes["gid"] == gid].copy()
+        return (
+            ("Участник найден. Откройте его карточку через поиск по gid."
+             if not result.empty else "Такой gid отсутствует в текущем графе."),
+            result,
+        )
+
+    if any(word in normalized for word in ("собира", "аккум", "консолид")):
+        result = nodes[nodes["role"] == "consolidator"].copy()
+        answer = "Показываю приоритетные точки сбора средств."
+    elif any(word in normalized for word in ("распредел", "веер", "получател")):
+        result = nodes[nodes["role"] == "distributor"].copy()
+        answer = "Показываю узлы с веерным распределением средств."
+    elif any(word in normalized for word in ("транзит", "быстро", "день")):
+        rapid = nodes.get("rapid_flow_days", pd.Series(0, index=nodes.index))
+        result = nodes[(nodes["role"] == "transit") | (rapid > 0)].copy()
+        answer = "Показываю транзитные узлы и операции в окне до двух дней."
+    elif any(word in normalized for word in ("аномал", "необыч", "подозр")):
+        result = nodes.copy()
+        answer = "Показываю узлы с наибольшей аномальностью относительно своего колена."
+    elif any(word in normalized for word in ("координ", "организ", "выше")):
+        result = nodes[nodes["role"] == "coordinator"].copy()
+        answer = "Показываю структурных координаторов, связывающих seed и кластеры."
+    else:
+        result = nodes.copy()
+        answer = "Запрос не распознан точно. Показываю общий приоритет проверки."
+
+    sort_column = "anomaly_score" if "аномал" in normalized and "anomaly_score" in result else "priority_score"
+    return answer, result.sort_values(sort_column, ascending=False).head(10)
+
+
+def select_graph_neighborhood(
+    edges: pd.DataFrame,
+    selected_gid: int,
+    radius: int,
+    edge_limit: int,
+) -> pd.DataFrame:
+    """Select the strongest connected edges hop by hop around one participant."""
+    frontier = {selected_gid}
+    visited_nodes = {selected_gid}
+    selected_indices: list[int] = []
+
+    for hop in range(radius):
+        candidates = edges[
+            edges["src"].isin(frontier) | edges["dst"].isin(frontier)
+        ].drop(index=selected_indices, errors="ignore")
+        if candidates.empty:
+            break
+        remaining = edge_limit - len(selected_indices)
+        if remaining <= 0:
+            break
+        hops_left = radius - hop
+        quota = remaining if hops_left == 1 else max(1, math.ceil(remaining / hops_left))
+        chosen = candidates.sort_values("sum_kzt", ascending=False).head(quota)
+        selected_indices.extend(chosen.index.tolist())
+        reached = set(chosen["src"].astype(int)) | set(chosen["dst"].astype(int))
+        frontier = reached - visited_nodes
+        visited_nodes |= reached
+        if not frontier:
+            break
+
+    return edges.loc[selected_indices].copy()
+
+
+def render_neighborhood(
+    nodes: pd.DataFrame,
+    edges: pd.DataFrame,
+    selected_gid: int,
+    radius: int = 1,
+    edge_limit: int = 12,
+) -> None:
     from pyvis.network import Network
 
-    neighborhood = edges[(edges["src"] == selected_gid) | (edges["dst"] == selected_gid)].copy()
-    neighborhood = neighborhood.sort_values("sum_kzt", ascending=False).head(149)
+    neighborhood = select_graph_neighborhood(edges, selected_gid, radius, edge_limit)
     visible_gids = {selected_gid} | set(neighborhood["src"].astype(int)) | set(
         neighborhood["dst"].astype(int)
     )
     visible_nodes = nodes[nodes["gid"].isin(visible_gids)]
     is_dark = st.context.theme.type == "dark"
+    background = "#0B1120" if is_dark else "#F8F7F2"
+    font_color = "#E5E7EB" if is_dark else "#17211F"
 
     network = Network(
-        height="520px",
+        height="570px",
         width="100%",
         directed=True,
-        bgcolor="#0B1120" if is_dark else "#FFFFFF",
-        font_color="#E5E7EB" if is_dark else "#111827",
+        bgcolor=background,
+        font_color=font_color,
         cdn_resources="in_line",
     )
     for row in visible_nodes.itertuples(index=False):
         is_selected = int(row.gid) == selected_gid
         role_name = ROLE_LABELS.get(row.role, row.role)
+        node_color = GRAPH_COLORS.get(row.role, "#64748B")
+        gid_text = str(int(row.gid))
+        compact_label = gid_text if is_selected else f"…{gid_text[-6:]}"
         network.add_node(
-            str(int(row.gid)),
-            label=node_label(int(row.gid), selected_gid),
+            gid_text,
+            label=f"{role_name}\n{compact_label}" if is_selected else compact_label,
             title=(
                 f"gid: {int(row.gid)}<br>Роль: {role_name}<br>"
-                f"Приоритет: {row.priority_score:.2f}<br>{row.evidence}"
+                f"Колено: {int(row.depth)}<br>Приоритет: {row.priority_score:.2f}<br>"
+                f"Входящий поток: {float(row.in_kzt):,.0f} ₸<br>"
+                f"Исходящий поток: {float(row.out_kzt):,.0f} ₸<br>{row.evidence}"
             ),
-            color=GRAPH_COLORS.get(row.role, "#64748B"),
-            size=34 if is_selected else 10 + 18 * float(row.priority_score),
+            color={
+                "background": node_color,
+                "border": "#111827" if is_selected else node_color,
+                "highlight": {"background": node_color, "border": "#111827"},
+            },
+            size=30 if is_selected else 12 + 14 * float(row.priority_score),
             shape="diamond" if bool(row.is_seed) else "dot",
-            borderWidth=5 if is_selected else 1,
+            borderWidth=4 if is_selected else 1,
+            level=int(row.depth),
         )
+    max_amount = max(float(neighborhood["sum_kzt"].max()), 1.0)
     for row in neighborhood.itertuples(index=False):
+        if int(row.dst) == selected_gid:
+            edge_color = "#2563EB"
+        elif int(row.src) == selected_gid:
+            edge_color = "#EA580C"
+        else:
+            edge_color = "#82938F" if not is_dark else "#64748B"
+        relative_width = math.log10(float(row.sum_kzt) + 1) / math.log10(max_amount + 1)
         network.add_edge(
             str(int(row.src)),
             str(int(row.dst)),
-            value=max(1.0, math.log10(float(row.sum_kzt) + 1)),
+            width=1.0 + 4.0 * relative_width,
             title=f"{float(row.sum_kzt):,.0f} ₸ · {int(row.n_tx)} операций",
             arrows="to",
+            color={"color": edge_color, "highlight": edge_color, "opacity": 0.78},
         )
-    network.set_options(
-        '{"interaction":{"hover":true,"navigationButtons":true},'
-        '"physics":{"stabilization":{"iterations":160},"barnesHut":{"springLength":125}},'
-        '"edges":{"smooth":{"type":"dynamic"},"color":{"color":"#94A3B8"}},'
-        '"nodes":{"font":{"size":12,"face":"Inter, Arial"}}}'
-    )
-    st.iframe(network.generate_html(), width="stretch", height=540)
+    network.set_options(json.dumps({
+        "layout": {
+            "hierarchical": {
+                "enabled": True,
+                "direction": "LR",
+                "sortMethod": "directed",
+                "levelSeparation": 220,
+                "nodeSpacing": 28,
+                "treeSpacing": 70,
+                "blockShifting": True,
+                "edgeMinimization": True,
+            }
+        },
+        "interaction": {
+            "hover": True,
+            "navigationButtons": False,
+            "keyboard": True,
+            "tooltipDelay": 120,
+        },
+        "physics": {"enabled": False},
+        "edges": {
+            "arrowStrikethrough": False,
+            "smooth": {"enabled": True, "type": "cubicBezier", "roundness": 0.34},
+            "arrows": {"to": {"enabled": True, "scaleFactor": 0.55}},
+        },
+        "nodes": {
+            "font": {
+                "size": 12,
+                "face": "Inter, Arial",
+                "color": font_color,
+                "strokeWidth": 3,
+                "strokeColor": background,
+            }
+        },
+    }))
+    st.iframe(network.generate_html(), width="stretch", height=590)
 
 
 def render_role_badge(role: str) -> None:
@@ -238,7 +379,9 @@ with st.sidebar:
         )
 
 try:
-    nodes, edges, clusters, top, transactions = load_results(out_dir, data_dir)
+    nodes, edges, clusters, top, transactions, resilience, route_patterns = load_results(
+        out_dir, data_dir
+    )
 except FileNotFoundError:
     st.error("Результаты анализа не найдены", icon=":material/folder_off:")
     st.info("Запустите расчётный пайплайн, затем укажите папку результатов в боковой панели.")
@@ -264,7 +407,11 @@ with st.sidebar:
     )
     selected_signals = st.pills(
         "Подозрительная активность",
-        ["Сбор средств", "Веерные переводы", "Транзит", "Несколько seed", "Высокий оборот"],
+        [
+            "Сбор средств", "Веерные переводы", "Транзит", "Несколько seed",
+            "Высокий оборот", "Аномалия колена", "Быстрый транзит", "Цикл",
+            "Синхронные плательщики", "Всплеск активности",
+        ],
         selection_mode="multi",
         wrap=True,
         help="При нескольких вариантах достаточно совпадения хотя бы с одним сигналом.",
@@ -394,6 +541,10 @@ with card_col:
         st.write(node_rationale)
         st.caption("Сигналы: " + (" · ".join(node_signals) if node_signals else "не выявлены"))
         st.caption(node["evidence"])
+        if "data_gap" in node.index and "next_request" in node.index:
+            with st.expander("Какой запрос сделать следующим", icon=":material/outgoing_mail:"):
+                st.write(node["data_gap"])
+                st.markdown(f"**Рекомендуемое действие:** {node['next_request']}")
         if bool(node["truncated_by_depth"]):
             st.warning("Данные заканчиваются на глубине 4. Следующие переводы не видны.")
         current_route = review_cases.get(selected_gid, review_routes[0])
@@ -466,15 +617,56 @@ else:
             icon=":material/download:",
         )
 
+with st.expander("Ассистент аналитика", icon=":material/psychology:"):
+    st.caption(
+        "Локальный интерпретатор запросов. Примеры: «кто собирает деньги», "
+        "«покажи быстрый транзит», «кто стоит выше», «аномальные узлы»."
+    )
+    assistant_query = st.text_input(
+        "Вопрос по графу",
+        placeholder="Кто собирает деньги от нескольких seed?",
+        key="assistant_query",
+    )
+    if assistant_query.strip():
+        assistant_answer, assistant_nodes = answer_analyst_query(assistant_query, nodes)
+        st.write(assistant_answer)
+        if not assistant_nodes.empty:
+            assistant_view = assistant_nodes.copy()
+            assistant_view["gid"] = assistant_view["gid"].astype(str)
+            assistant_view["role_display"] = assistant_view["role"].map(ROLE_LABELS)
+            assistant_view["rationale"] = assistant_view.apply(analyst_rationale, axis=1)
+            assistant_columns = ["gid", "role_display", "priority_score"]
+            if "anomaly_score" in assistant_view:
+                assistant_columns.append("anomaly_score")
+            assistant_columns.append("rationale")
+            st.dataframe(
+                assistant_view[assistant_columns],
+                width="stretch",
+                hide_index=True,
+                column_config={
+                    "gid": st.column_config.TextColumn("gid", pinned=True),
+                    "role_display": st.column_config.TextColumn("Роль"),
+                    "priority_score": st.column_config.ProgressColumn(
+                        "Приоритет", min_value=0.0, max_value=1.0, format="%.2f"
+                    ),
+                    "anomaly_score": st.column_config.ProgressColumn(
+                        "Аномальность", min_value=0.0, max_value=1.0, format="%.2f"
+                    ),
+                    "rationale": st.column_config.TextColumn("Обоснование", width="large"),
+                },
+            )
+
 st.subheader("Анализ участника")
 view_mode = st.segmented_control(
     "Представление",
-    ["network", "trace", "transactions", "links", "clusters"],
+    ["network", "trace", "transactions", "patterns", "resilience", "links", "clusters"],
     default="network",
     format_func=lambda value: {
         "network": "Сеть",
         "trace": "След денег",
         "transactions": "Операции",
+        "patterns": "Маршруты",
+        "resilience": "Устойчивость",
         "links": "Связи",
         "clusters": "Кластеры",
     }[value],
@@ -485,15 +677,39 @@ neighborhood = edges[(edges["src"] == selected_gid) | (edges["dst"] == selected_
 
 if view_mode == "network":
     with st.container(border=True):
+        graph_controls = st.container(horizontal=True, vertical_alignment="bottom")
+        with graph_controls:
+            graph_radius = st.segmented_control(
+                "Окружение",
+                [1, 2],
+                default=1,
+                format_func=lambda value: f"{value} колено" if value == 1 else f"{value} колена",
+                help="Второе колено раскрывает контрагентов соседних узлов.",
+            )
+            graph_edge_limit = st.select_slider(
+                "Максимум связей",
+                options=[12, 20, 40, 60],
+                value=12,
+                help="Показываются крупнейшие связи на каждом шаге от выбранного узла.",
+            )
+        st.caption(
+            "Слева направо — колена сети · синий поток входит в выбранный узел · "
+            "оранжевый выходит · цвет узла показывает роль · размер показывает приоритет"
+        )
         legend = st.container(horizontal=True, vertical_alignment="center")
         with legend:
-            st.caption("Цвет — роль · размер — приоритет · ромб — seed")
             for role in ("coordinator", "consolidator", "distributor", "transit", "terminal"):
                 render_role_badge(role)
         if neighborhood.empty:
             st.info("У участника нет наблюдаемых связей в выгрузке.")
         else:
-            render_neighborhood(nodes, edges, selected_gid)
+            render_neighborhood(
+                nodes,
+                edges,
+                selected_gid,
+                radius=int(graph_radius or 1),
+                edge_limit=int(graph_edge_limit),
+            )
 
 elif view_mode == "trace":
     trace_path = trace_from_seed(nodes, edges, selected_gid)
@@ -624,6 +840,67 @@ elif view_mode == "links":
                 "dst": st.column_config.TextColumn("Получатель", pinned=True),
                 "sum_kzt": st.column_config.NumberColumn("Сумма", format="localized", width="medium"),
                 "n_tx": st.column_config.NumberColumn("Операций", format="%d", width="small"),
+            },
+        )
+
+elif view_mode == "patterns":
+    if route_patterns.empty:
+        st.info("Перезапустите пайплайн, чтобы построить устойчивые маршруты A→B→C.")
+    else:
+        patterns_view = route_patterns.copy()
+        for column in ("src", "via", "dst"):
+            patterns_view[column] = patterns_view[column].astype(str)
+        patterns_view["via_role"] = patterns_view["via_role"].map(ROLE_LABELS).fillna(
+            patterns_view["via_role"]
+        )
+        st.caption(
+            "Двухшаговые маршруты отсортированы по минимальной сумме на двух связях. "
+            "Это кандидаты для проверки, а не доказательство движения одной суммы."
+        )
+        st.dataframe(
+            patterns_view,
+            width="stretch",
+            hide_index=True,
+            column_config={
+                "src": st.column_config.TextColumn("Источник", pinned=True),
+                "via": st.column_config.TextColumn("Через узел"),
+                "dst": st.column_config.TextColumn("Получатель"),
+                "bottleneck_kzt": st.column_config.NumberColumn("Минимум по пути", format="localized"),
+                "incoming_kzt": st.column_config.NumberColumn("Вход", format="localized"),
+                "outgoing_kzt": st.column_config.NumberColumn("Выход", format="localized"),
+                "via_role": st.column_config.TextColumn("Роль посредника"),
+                "via_priority": st.column_config.ProgressColumn(
+                    "Приоритет", min_value=0.0, max_value=1.0, format="%.2f"
+                ),
+                "rapid_signal": st.column_config.CheckboxColumn("Быстрый транзит"),
+                "cycle_signal": st.column_config.CheckboxColumn("Цикл"),
+            },
+        )
+
+elif view_mode == "resilience":
+    if resilience.empty:
+        st.info("Перезапустите пайплайн, чтобы рассчитать устойчивость сети.")
+    else:
+        st.caption(
+            "Стресс-тест показывает, как меняется связность сети после удаления узлов "
+            "с максимальным приоритетом."
+        )
+        chart_data = resilience.set_index("n_removed")[["largest_component_share", "fragmentation"]]
+        st.line_chart(chart_data, x_label="Удалено узлов", y_label="Доля")
+        st.dataframe(
+            resilience,
+            width="stretch",
+            hide_index=True,
+            column_config={
+                "n_removed": st.column_config.NumberColumn("Удалено", format="%d"),
+                "removed_gids": st.column_config.TextColumn("Удалённые gid", width="large"),
+                "remaining_nodes": st.column_config.NumberColumn("Осталось узлов", format="%d"),
+                "n_components": st.column_config.NumberColumn("Компоненты", format="%d"),
+                "largest_component": st.column_config.NumberColumn("Крупнейшая компонента", format="%d"),
+                "largest_component_share": st.column_config.NumberColumn("Доля крупнейшей", format="%.2f"),
+                "fragmentation": st.column_config.ProgressColumn(
+                    "Фрагментация", min_value=0.0, max_value=1.0, format="%.2f"
+                ),
             },
         )
 

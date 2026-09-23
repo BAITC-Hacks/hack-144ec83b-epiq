@@ -3,12 +3,13 @@ from __future__ import annotations
 import json
 import platform
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import networkx as nx
 import pandas as pd
 
+from .advanced_analysis import build_resilience_report, build_route_patterns
 from .graph_features import assign_clusters, build_graph, calculate_features
 from .io_validation import file_hashes, load_data, validate_data
 from .scoring import build_cluster_summary, score_nodes
@@ -30,6 +31,8 @@ class AnalysisResult:
     edges: pd.DataFrame
     quality_report: dict
     manifest: dict
+    resilience: pd.DataFrame = field(default_factory=pd.DataFrame)
+    route_patterns: pd.DataFrame = field(default_factory=pd.DataFrame)
 
 
 def analyze(data_dir: Path) -> AnalysisResult:
@@ -41,6 +44,8 @@ def analyze(data_dir: Path) -> AnalysisResult:
     features, communities = assign_clusters(graph, features)
     scored = score_nodes(features)
     cluster_summary = build_cluster_summary(scored, communities, edges)
+    resilience = build_resilience_report(graph, scored)
+    route_patterns = build_route_patterns(graph, scored)
 
     top = (
         scored.sort_values(["priority_score", "gid"], ascending=[False, True])
@@ -57,11 +62,14 @@ def analyze(data_dir: Path) -> AnalysisResult:
             "n_isolates": int(scored["is_isolate"].sum()),
             "n_truncated_depth4": int(scored["truncated_by_depth"].sum()),
             "role_counts": {str(k): int(v) for k, v in scored["role"].value_counts().items()},
+            "n_cycle_nodes": int(scored["in_cycle"].sum()),
+            "n_rapid_flow_nodes": int((scored["rapid_flow_days"] > 0).sum()),
+            "n_high_anomaly_nodes": int((scored["anomaly_score"] >= 0.8).sum()),
         }
     )
     manifest = {
         "status": "completed",
-        "rules_version": "1.0.0",
+        "rules_version": "1.1.0",
         "input_sha256": file_hashes(data_dir),
         "duration_seconds": round(time.perf_counter() - started, 3),
         "python": platform.python_version(),
@@ -75,6 +83,8 @@ def analyze(data_dir: Path) -> AnalysisResult:
         edges=edges.copy(),
         quality_report=quality,
         manifest=manifest,
+        resilience=resilience,
+        route_patterns=route_patterns,
     )
     validate_result(result)
     return result
@@ -127,6 +137,8 @@ def write_outputs(result: AnalysisResult, out_dir: Path) -> None:
     result.top_nodes.to_csv(out_dir / "top_nodes.csv", index=False)
     result.nodes.to_csv(out_dir / "node_features.csv", index=False)
     result.edges.to_csv(out_dir / "edges.csv", index=False)
+    result.resilience.to_csv(out_dir / "resilience.csv", index=False)
+    result.route_patterns.to_csv(out_dir / "route_patterns.csv", index=False)
     (out_dir / "quality_report.json").write_text(
         json.dumps(result.quality_report, ensure_ascii=False, indent=2), encoding="utf-8"
     )

@@ -71,6 +71,46 @@ def calculate_features(
     incoming_dates = tx.groupby("dst")["date"].agg(["min", "max"])
     outgoing_dates = tx.groupby("src")["date"].agg(["min", "max"])
     period_end = tx["date"].max()
+    incoming_days = tx.groupby("dst")["date"].apply(
+        lambda values: sorted(set(pd.to_datetime(values).dt.normalize()))
+    ).to_dict()
+    outgoing_days = tx.groupby("src")["date"].apply(
+        lambda values: sorted(set(pd.to_datetime(values).dt.normalize()))
+    ).to_dict()
+    incoming_daily = (
+        tx.assign(day=tx["date"].dt.normalize())
+        .groupby(["dst", "day"])
+        .agg(payers=("src", "nunique"), amount=("sum_kzt", "sum"))
+        .reset_index()
+    )
+    max_same_day_payers = incoming_daily.groupby("dst")["payers"].max().to_dict()
+    max_daily_in = incoming_daily.groupby("dst")["amount"].max().to_dict()
+    median_daily_in = incoming_daily.groupby("dst")["amount"].median().to_dict()
+
+    same_day_flow: dict[int, int] = {}
+    rapid_flow: dict[int, int] = {}
+    min_forward_delay: dict[int, float] = {}
+    for gid in gids:
+        in_days = incoming_days.get(gid, [])
+        out_days = outgoing_days.get(gid, [])
+        same_day_flow[gid] = len(set(in_days) & set(out_days))
+        delays = [
+            int((out_day - in_day).days)
+            for in_day in in_days
+            for out_day in out_days
+            if out_day >= in_day
+        ]
+        rapid_flow[gid] = sum(
+            1 for in_day in in_days if any(0 <= (out_day - in_day).days <= 2 for out_day in out_days)
+        )
+        min_forward_delay[gid] = float(min(delays)) if delays else np.nan
+
+    cycle_size = {gid: 0 for gid in gids}
+    for component in nx.strongly_connected_components(graph):
+        is_cycle = len(component) > 1 or any(graph.has_edge(node, node) for node in component)
+        if is_cycle:
+            for gid in component:
+                cycle_size[int(gid)] = len(component)
 
     result = nodes[["gid", "depth", "is_seed"]].copy().sort_values("gid")
     result["in_deg"] = result["gid"].map(in_deg).fillna(0).astype(int)
@@ -95,8 +135,40 @@ def calculate_features(
     result["first_out"] = result["gid"].map(outgoing_dates["min"])
     result["last_out"] = result["gid"].map(outgoing_dates["max"])
     result["days_after_last_in"] = (period_end - result["last_in"]).dt.days
+    result["same_day_flow_days"] = result["gid"].map(same_day_flow).fillna(0).astype(int)
+    result["rapid_flow_days"] = result["gid"].map(rapid_flow).fillna(0).astype(int)
+    result["min_forward_delay_days"] = result["gid"].map(min_forward_delay)
+    result["max_same_day_payers"] = (
+        result["gid"].map(max_same_day_payers).fillna(0).astype(int)
+    )
+    result["max_daily_in_kzt"] = result["gid"].map(max_daily_in).fillna(0.0)
+    daily_median = result["gid"].map(median_daily_in).fillna(0.0)
+    result["incoming_spike_ratio"] = np.where(
+        daily_median > 0, result["max_daily_in_kzt"] / daily_median, 0.0
+    )
+    result["cycle_size"] = result["gid"].map(cycle_size).fillna(0).astype(int)
+    result["in_cycle"] = result["cycle_size"] > 0
     result["truncated_by_depth"] = (result["depth"] == 4) & (result["out_deg"] == 0)
     result["is_isolate"] = (result["in_deg"] == 0) & (result["out_deg"] == 0)
+    result["data_gap"] = "Критичных пробелов по наблюдаемому контуру не выявлено"
+    result["next_request"] = "Сверить операции и контрагентов по первичным банковским данным"
+    depth_mask = result["truncated_by_depth"]
+    result.loc[depth_mask, "data_gap"] = "Исходящий поток после четвёртого колена неизвестен"
+    result.loc[depth_mask, "next_request"] = (
+        "Запросить исходящие переводы узла за тот же период и следующий месяц"
+    )
+    seed_mask = result["is_seed"].astype(bool)
+    result.loc[seed_mask, "data_gap"] = "Входящий поток seed до начала наблюдаемой цепочки неполон"
+    result.loc[seed_mask, "next_request"] = (
+        "Запросить входящие переводы seed до первой наблюдаемой операции"
+    )
+    missing_inbound = (~seed_mask) & (result["in_kzt"] > 0) & (result["pass_through"] > 1.5)
+    result.loc[missing_inbound, "data_gap"] = (
+        "Исходящий объём заметно выше наблюдаемого входящего"
+    )
+    result.loc[missing_inbound, "next_request"] = (
+        "Запросить полный входящий оборот и остаток на начало периода"
+    )
     return result.reset_index(drop=True)
 
 

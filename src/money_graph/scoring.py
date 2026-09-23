@@ -138,6 +138,44 @@ def score_nodes(features: pd.DataFrame) -> pd.DataFrame:
         + 0.10 * df["role_score"]
     ).clip(0, 1).round(6)
     df.loc[df["is_isolate"], "priority_score"] = 0.0
+
+    turnover = df[["in_kzt", "out_kzt"]].max(axis=1)
+    degree = df["in_deg"] + df["out_deg"]
+    df["depth_turnover_pct"] = turnover.groupby(df["depth"]).rank(method="average", pct=True)
+    df["depth_degree_pct"] = degree.groupby(df["depth"]).rank(method="average", pct=True)
+    rapid_days = df.get("rapid_flow_days", pd.Series(0, index=df.index))
+    cycle_sizes = df.get("cycle_size", pd.Series(0, index=df.index))
+    rapid_signal = (rapid_days > 0).astype(float)
+    cycle_signal = (cycle_sizes > 0).astype(float)
+    df["anomaly_score"] = (
+        0.45 * df["depth_turnover_pct"]
+        + 0.25 * df["depth_degree_pct"]
+        + 0.15 * df["p_between"]
+        + 0.10 * rapid_signal
+        + 0.05 * cycle_signal
+    ).clip(0, 1).round(6)
+
+    anomaly_flags = []
+    for row in df.itertuples(index=False):
+        flags = []
+        if row.depth_turnover_pct >= 0.95:
+            flags.append("оборот выше 95% узлов своего колена")
+        if row.depth_degree_pct >= 0.95:
+            flags.append("связность выше 95% узлов своего колена")
+        if getattr(row, "rapid_flow_days", 0) > 0:
+            flags.append("входящие и исходящие операции в окне 0–2 дня")
+        if getattr(row, "cycle_size", 0) > 0:
+            flags.append(f"участник цикла из {int(row.cycle_size)} узлов")
+        if getattr(row, "max_same_day_payers", 0) >= 3:
+            flags.append(
+                f"до {int(row.max_same_day_payers)} плательщиков переводили в один день"
+            )
+        if getattr(row, "incoming_spike_ratio", 0) >= 3:
+            flags.append(
+                f"дневной входящий всплеск x{float(row.incoming_spike_ratio):.1f} к медиане"
+            )
+        anomaly_flags.append("; ".join(flags) if flags else "выраженных аномалий не выявлено")
+    df["anomaly_flags"] = anomaly_flags
     return df
 
 
