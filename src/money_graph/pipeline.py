@@ -11,6 +11,8 @@ import pandas as pd
 
 from .advanced_analysis import build_resilience_report, build_route_patterns
 from .route_evidence import enrich_route_evidence
+from .repeated_routes import repeated_routes
+from .demo_cases import build_demo_cases
 from .graph_features import assign_clusters, build_graph, calculate_features
 from .io_validation import file_hashes, load_data, validate_data
 from .scoring import build_cluster_summary, score_nodes
@@ -34,6 +36,8 @@ class AnalysisResult:
     manifest: dict
     resilience: pd.DataFrame = field(default_factory=pd.DataFrame)
     route_patterns: pd.DataFrame = field(default_factory=pd.DataFrame)
+    repeated_routes: pd.DataFrame = field(default_factory=pd.DataFrame)
+    route_episodes: pd.DataFrame = field(default_factory=pd.DataFrame)
 
 
 def analyze(data_dir: Path) -> AnalysisResult:
@@ -47,6 +51,7 @@ def analyze(data_dir: Path) -> AnalysisResult:
     cluster_summary = build_cluster_summary(scored, communities, edges)
     resilience = build_resilience_report(graph, scored)
     route_patterns = enrich_route_evidence(build_route_patterns(graph, scored), tx)
+    repeated, episodes = repeated_routes(tx)
 
     top = (
         scored.sort_values(["priority_score", "gid"], ascending=[False, True])
@@ -66,11 +71,12 @@ def analyze(data_dir: Path) -> AnalysisResult:
             "n_cycle_nodes": int(scored["in_cycle"].sum()),
             "n_rapid_flow_nodes": int((scored["rapid_flow_days"] > 0).sum()),
             "n_high_anomaly_nodes": int((scored["anomaly_score"] >= 0.8).sum()),
+            "n_repeated_routes": len(repeated),
         }
     )
     manifest = {
         "status": "completed",
-        "rules_version": "1.2.0",
+        "rules_version": "1.3.0",
         "input_sha256": file_hashes(data_dir),
         "duration_seconds": round(time.perf_counter() - started, 3),
         "python": platform.python_version(),
@@ -86,6 +92,8 @@ def analyze(data_dir: Path) -> AnalysisResult:
         manifest=manifest,
         resilience=resilience,
         route_patterns=route_patterns,
+        repeated_routes=repeated,
+        route_episodes=episodes,
     )
     validate_result(result)
     return result
@@ -140,10 +148,16 @@ def write_outputs(result: AnalysisResult, out_dir: Path) -> None:
     result.edges.to_csv(out_dir / "edges.csv", index=False)
     result.resilience.to_csv(out_dir / "resilience.csv", index=False)
     result.route_patterns.to_csv(out_dir / "route_patterns.csv", index=False)
+    result.repeated_routes.to_csv(out_dir / "repeated_routes.csv", index=False)
+    result.route_episodes.to_csv(out_dir / "route_episodes.csv", index=False)
     (out_dir / "quality_report.json").write_text(
         json.dumps(result.quality_report, ensure_ascii=False, indent=2), encoding="utf-8"
     )
     (out_dir / "run_manifest.json").write_text(
         json.dumps(result.manifest, ensure_ascii=False, indent=2), encoding="utf-8"
     )
+    cases, demo_text = build_demo_cases(result.nodes, result.edges, result.repeated_routes,
+                                       result.route_episodes, result.manifest)
+    (out_dir / "demo_cases.json").write_text(json.dumps(cases, ensure_ascii=False, indent=2), encoding="utf-8")
+    (out_dir / "demo_cases.md").write_text(demo_text, encoding="utf-8")
 

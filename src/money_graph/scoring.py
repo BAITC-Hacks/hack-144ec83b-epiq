@@ -21,6 +21,28 @@ def _positive_percentile(series: pd.Series) -> pd.Series:
     return result
 
 
+PRIORITY_LABELS = {
+    "seed_contribution": ("Охват seed", 0.30),
+    "turnover_contribution": ("Оборот", 0.25),
+    "between_contribution": ("Посредничество", 0.20),
+    "degree_contribution": ("Связность", 0.15),
+    "role_contribution": ("Сила роли", 0.10),
+}
+
+
+def priority_components(nodes: pd.DataFrame) -> pd.DataFrame:
+    """Single source of truth for the score and its per-factor explanation."""
+    parts = pd.DataFrame({
+        "seed_contribution": 0.30 * (nodes["seed_reach"] / 5).clip(0, 1),
+        "turnover_contribution": 0.25 * nodes["p_turnover"],
+        "between_contribution": 0.20 * nodes["p_between"],
+        "degree_contribution": 0.15 * nodes["p_degree"],
+        "role_contribution": 0.10 * nodes["role_score"],
+    }, index=nodes.index)
+    parts.loc[nodes["is_isolate"].astype(bool), :] = 0.0
+    return parts
+
+
 def score_nodes(features: pd.DataFrame) -> pd.DataFrame:
     df = features.copy()
     df["p_in"] = _positive_percentile(df["in_kzt"])
@@ -130,14 +152,9 @@ def score_nodes(features: pd.DataFrame) -> pd.DataFrame:
     df["role_score"] = role_scores
     df["role_ambiguous"] = ambiguous
     df["evidence"] = evidence
-    df["priority_score"] = (
-        0.30 * (df["seed_reach"] / 5).clip(0, 1)
-        + 0.25 * df["p_turnover"]
-        + 0.20 * df["p_between"]
-        + 0.15 * df["p_degree"]
-        + 0.10 * df["role_score"]
-    ).clip(0, 1).round(6)
-    df.loc[df["is_isolate"], "priority_score"] = 0.0
+    parts = priority_components(df)
+    df[parts.columns] = parts
+    df["priority_score"] = parts.sum(axis=1).clip(0, 1).round(6)
 
     turnover = df[["in_kzt", "out_kzt"]].max(axis=1)
     degree = df["in_deg"] + df["out_deg"]

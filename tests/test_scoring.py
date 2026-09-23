@@ -2,7 +2,18 @@ from __future__ import annotations
 
 import pandas as pd
 
-from money_graph.scoring import score_nodes
+from money_graph.scoring import PRIORITY_LABELS, score_nodes
+
+
+def test_priority_contributions_sum_to_score_and_isolate_stays_zero():
+    rows = [_base_row(gid=1, in_deg=4, in_kzt=1_000_000, in_tx=4, seed_reach=3),
+            _base_row(gid=2, out_deg=6, out_kzt=2_000_000, out_tx=6, seed_reach=7),
+            _base_row(gid=3)]
+    result = score_nodes(pd.DataFrame(rows))
+    pd.testing.assert_series_equal(result[list(PRIORITY_LABELS)].sum(axis=1).round(6),
+                                   result.priority_score, check_names=False)
+    assert result.loc[2, list(PRIORITY_LABELS)].eq(0).all()
+    assert result.loc[1, "seed_contribution"] == 0.3
 
 
 def test_depth_four_sink_is_not_terminal():

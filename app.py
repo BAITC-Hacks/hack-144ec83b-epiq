@@ -14,6 +14,9 @@ import streamlit as st
 ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(ROOT / "src"))
 
+from money_graph.investigation_ui import show_common_recipients, show_repeated_routes
+from money_graph.scoring import PRIORITY_LABELS, priority_components
+
 ROLE_LABELS = {
     "coordinator": "Координатор",
     "consolidator": "Аккумулятор",
@@ -41,7 +44,7 @@ GRAPH_COLORS = {
 
 
 @st.cache_data(max_entries=4)
-def load_results(out_dir: str, data_dir: str) -> tuple[pd.DataFrame, ...]:
+def load_results(out_dir: str, data_dir: str, version: int = 0) -> tuple[pd.DataFrame, ...]:
     root = Path(out_dir)
     transactions_path = Path(data_dir) / "transactions.parquet"
     transactions = (
@@ -61,6 +64,8 @@ def load_results(out_dir: str, data_dir: str) -> tuple[pd.DataFrame, ...]:
         transactions,
         pd.read_csv(resilience_path) if resilience_path.exists() else pd.DataFrame(),
         pd.read_csv(route_patterns_path) if route_patterns_path.exists() else pd.DataFrame(),
+        pd.read_csv(root / "repeated_routes.csv") if (root / "repeated_routes.csv").exists() else pd.DataFrame(),
+        pd.read_csv(root / "route_episodes.csv") if (root / "route_episodes.csv").exists() else pd.DataFrame(),
     )
 
 
@@ -395,8 +400,9 @@ with st.sidebar:
         )
 
 try:
-    nodes, edges, clusters, top, transactions, resilience, route_patterns = load_results(
-        out_dir, data_dir
+    nodes, edges, clusters, top, transactions, resilience, route_patterns, repeats, episodes = load_results(
+        out_dir, data_dir,
+        version=(Path(out_dir) / "run_manifest.json").stat().st_mtime_ns
     )
 except FileNotFoundError:
     st.error("Результаты анализа не найдены", icon=":material/folder_off:")
@@ -464,7 +470,7 @@ with metrics:
 
 active_roles = selected_roles or role_options
 turnover_cutoff = float((nodes["in_kzt"] + nodes["out_kzt"]).quantile(0.9))
-ranked_nodes = nodes.sort_values("priority_score", ascending=False).copy()
+ranked_nodes = nodes.sort_values(["priority_score", "gid"], ascending=[False, True]).copy()
 ranked_nodes["rank"] = range(1, len(ranked_nodes) + 1)
 ranked_nodes["signal_list"] = ranked_nodes.apply(
     lambda row: risk_signals(row, turnover_cutoff), axis=1
@@ -599,6 +605,35 @@ with card_col:
             st.session_state["review_cases"] = review_cases
             st.toast("Решение сохранено", icon=":material/check_circle:")
 
+with st.expander("Почему такое место в топе", icon=":material/leaderboard:"):
+    current_parts = priority_components(nodes[nodes["gid"] == selected_gid]).iloc[0]
+    rank = int(ranked_nodes.loc[ranked_nodes["gid"] == selected_gid, "rank"].iloc[0])
+    st.write(f"Место {rank} из {len(nodes)} · итог {float(node['priority_score']):.6f}")
+    compare_options = [str(int(g)) for g in ranked_nodes.head(20)["gid"] if int(g) != selected_gid]
+    compare_gid = st.selectbox("Сравнить с участником из топ-20", compare_options,
+                               key=f"compare_{selected_gid}")
+    other = nodes[nodes["gid"] == int(compare_gid)] if compare_gid else None
+    other_parts = priority_components(other).iloc[0] if other is not None else None
+    rows = []
+    for field, (label, weight) in PRIORITY_LABELS.items():
+        part = {"Фактор": label, "Вклад": float(current_parts[field]), "Предел": weight}
+        if other_parts is not None:
+            part["У сравниваемого"] = float(other_parts[field])
+            part["Разница"] = float(current_parts[field] - other_parts[field])
+        rows.append(part)
+    st.dataframe(pd.DataFrame(rows), hide_index=True, width="stretch", column_config={
+        "Вклад": st.column_config.NumberColumn(format="%.4f"),
+        "Предел": st.column_config.NumberColumn(format="%.2f"),
+        "У сравниваемого": st.column_config.NumberColumn(format="%.4f"),
+        "Разница": st.column_config.NumberColumn(format="%.4f"),
+    })
+    if other is not None:
+        difference = float(node["priority_score"] - other["priority_score"].iloc[0])
+        st.caption(f"Разница итогового приоритета: {difference:+.6f}.")
+    st.caption("Вклады суммируются до итогового приоритета с округлением до 6 знаков. "
+               "Охват насыщается на 5 seed; оборот, посредничество и связность — "
+               "перцентиль среди положительных значений. При равенстве итогов порядок по gid.")
+
 st.subheader("Перечень для дальнейших действий")
 if not review_cases:
     st.info("Выберите участника, укажите решение и добавьте его в перечень.")
@@ -694,11 +729,12 @@ with st.expander("Ассистент аналитика", icon=":material/psycho
 st.subheader("Анализ участника")
 view_mode = st.segmented_control(
     "Представление",
-    ["network", "trace", "transactions", "patterns", "resilience", "links", "clusters"],
+    ["network", "trace", "common", "transactions", "patterns", "resilience", "links", "clusters"],
     default="network",
     format_func=lambda value: {
         "network": "Сеть",
         "trace": "След денег",
+        "common": "Общие получатели",
         "transactions": "Операции",
         "patterns": "Маршруты",
         "resilience": "Устойчивость",
@@ -754,6 +790,9 @@ if view_mode == "network":
                 transactions=transactions,
                 glow=graph_glow,
             )
+
+elif view_mode == "common":
+    show_common_recipients(nodes, edges, ROLE_LABELS)
 
 elif view_mode == "trace":
     trace_path = trace_from_seed(nodes, edges, selected_gid)
@@ -888,6 +927,8 @@ elif view_mode == "links":
         )
 
 elif view_mode == "patterns":
+    show_repeated_routes(repeats, episodes, selected_gid)
+    st.markdown("**Крупнейшие структурные маршруты**")
     if route_patterns.empty:
         st.info("Перезапустите пайплайн, чтобы построить устойчивые маршруты A→B→C.")
     else:

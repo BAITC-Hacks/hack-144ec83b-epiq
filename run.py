@@ -44,6 +44,7 @@ def main() -> int:
         print("[1/3] Creating local Python environment", flush=True)
         venv.EnvBuilder(with_pip=True).create(env_dir)
     env = os.environ.copy()
+    env["PYTHONUTF8"] = "1"
     env["PYTHONPATH"] = str(ROOT / "src")
     env["MONEY_GRAPH_DATA"], env["MONEY_GRAPH_OUT"] = str(data), str(out)
     # Check actual package constraints instead of relying on a stale install marker.
