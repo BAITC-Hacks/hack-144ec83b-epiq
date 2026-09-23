@@ -41,3 +41,37 @@ def enrich_route_evidence(routes: pd.DataFrame, transactions: pd.DataFrame) -> p
     for column in columns:
         result[column] = details[column]
     return result
+
+
+def graph_edge_signals(edges: pd.DataFrame, transactions: pd.DataFrame) -> dict:
+    """Signals for exact two-hop routes visible in the graph, not node risk."""
+    routes = []
+    for first in edges.itertuples(index=False):
+        for second in edges[edges["src"] == first.dst].itertuples(index=False):
+            if len({int(first.src), int(first.dst), int(second.dst)}) == 3:
+                routes.append((int(first.src), int(first.dst), int(second.dst)))
+    if not routes or transactions.empty:
+        return {}
+    candidates = pd.DataFrame(routes, columns=["src", "via", "dst"]).drop_duplicates()
+    verified = enrich_route_evidence(candidates, transactions)
+    signals = {}
+    for row in verified.itertuples(index=False):
+        if not row.rapid_signal:
+            continue
+        # Same-day order is unknown and must never get the stronger colour.
+        strong = row.delay_days > 0 and row.comparable_amounts
+        level = 2 if strong else 1
+        timing = ("Один день: порядок неизвестен" if row.delay_days == 0
+                  else f"Выход через {int(row.delay_days)} дн. после входа")
+        text = (
+            f"{int(row.src)} → {int(row.via)}\n"
+            f"{row.example_in_kzt:,.0f} ₸ · {pd.Timestamp(row.incoming_date):%d.%m.%Y}\n"
+            f"{int(row.via)} → {int(row.dst)}\n"
+            f"{row.example_out_kzt:,.0f} ₸ · {pd.Timestamp(row.outgoing_date):%d.%m.%Y}\n"
+            f"{timing}\nВыход / вход: {row.amount_ratio:.2f}\n"
+            "Сигнал для проверки; движение одной суммы не доказано."
+        )
+        for pair in ((int(row.src), int(row.via)), (int(row.via), int(row.dst))):
+            if pair not in signals or level > signals[pair]["level"]:
+                signals[pair] = {"level": level, "text": text}
+    return signals

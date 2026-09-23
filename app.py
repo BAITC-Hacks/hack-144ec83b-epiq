@@ -245,11 +245,15 @@ def render_neighborhood(
     selected_gid: int,
     radius: int = 1,
     edge_limit: int = 12,
+    transactions: pd.DataFrame | None = None,
+    glow: bool = True,
 ) -> None:
     from pyvis.network import Network
+    from money_graph.route_evidence import graph_edge_signals
     import networkx as nx
 
     neighborhood = select_graph_neighborhood(edges, selected_gid, radius, edge_limit)
+    signals = graph_edge_signals(neighborhood, transactions) if transactions is not None else {}
     visible_gids = {selected_gid} | set(neighborhood["src"].astype(int)) | set(
         neighborhood["dst"].astype(int)
     )
@@ -302,15 +306,22 @@ def render_neighborhood(
         )
     max_amount = max(float(neighborhood["sum_kzt"].max()), 1.0)
     for row in neighborhood.itertuples(index=False):
+        signal = signals.get((int(row.src), int(row.dst)))
         edge_color = "#626072" if selected_gid in (int(row.src), int(row.dst)) else "#42424E"
+        if signal:
+            edge_color = "#FF8D9B" if signal["level"] == 2 else "#EBC17B"
         relative_width = math.log10(float(row.sum_kzt) + 1) / math.log10(max_amount + 1)
         network.add_edge(
             str(int(row.src)),
             str(int(row.dst)),
-            width=0.4 + 1.1 * relative_width,
-            title=f"{float(row.sum_kzt):,.0f} ₸ · {int(row.n_tx)} операций",
+            width=(1.4 if signal else 0.4) + 1.1 * relative_width,
+            title=(f"Всего по связи: {float(row.sum_kzt):,.0f} ₸ · {int(row.n_tx)} операций\n\n"
+                   + (signal["text"] if signal else "На видимых двухшаговых маршрутах сигнал не найден. Это не оценка безопасности.")),
             arrows="to",
-            color={"color": edge_color, "highlight": "#C4B1EF", "hover": "#C4B1EF", "opacity": 0.7},
+            color={"color": edge_color, "highlight": edge_color if signal else "#C4B1EF",
+                   "hover": "#FFE9ED" if signal else "#C4B1EF", "opacity": 1 if signal else 0.55},
+            shadow={"enabled": bool(signal) and glow, "color": edge_color,
+                    "size": 16, "x": 0, "y": 0},
         )
     network.set_options(json.dumps({
         "layout": {"improvedLayout": False},
@@ -344,7 +355,7 @@ def render_neighborhood(
         ".card{border:0!important;background:transparent!important;}"
         "#mynetwork{border:0!important;border-radius:14px;}"
         "div.vis-tooltip{background:#292832;color:#EEEAF6;border:1px solid #514C63;"
-        "border-radius:8px;padding:12px;font:12px sans-serif;max-width:320px;white-space:normal;}"
+        "border-radius:8px;padding:12px;font:12px sans-serif;max-width:360px;white-space:pre-line;}"
         "</style></head>",
     )
     st.iframe(graph_html, width="stretch", height=590)
@@ -727,6 +738,10 @@ if view_mode == "network":
                     "color:#D2CEDD;padding:12px 16px;border-radius:10px;font-size:12px'>"
                     + "".join(f"<span><span style='color:{color}'>●</span> {ROLE_LABELS[role]}</span>"
                               for role, color in GRAPH_COLORS.items()) + "</div>")
+        graph_glow = st.toggle("Свечение связей с сигналами", value=True)
+        st.caption("Связи: янтарный — операции в окне 0–2 дня; коралловый — также известен "
+                   "порядок по дням и сопоставимы суммы. Наведите на линию для дат и сумм. "
+                   "Проверяются только маршруты в показанном окружении; серый не означает безопасный.")
         if neighborhood.empty:
             st.info("У участника нет наблюдаемых связей в выгрузке.")
         else:
@@ -736,6 +751,8 @@ if view_mode == "network":
                 selected_gid,
                 radius=int(graph_radius or 1),
                 edge_limit=int(graph_edge_limit),
+                transactions=transactions,
+                glow=graph_glow,
             )
 
 elif view_mode == "trace":

@@ -1,6 +1,6 @@
 import pandas as pd
 
-from money_graph.route_evidence import enrich_route_evidence
+from money_graph.route_evidence import enrich_route_evidence, graph_edge_signals
 
 
 def test_exact_counterparty_dates_and_reverse_time():
@@ -26,3 +26,19 @@ def test_empty_routes_keep_schema_and_large_identifiers():
     assert result.src.iloc[0] == gid
     assert not result.rapid_signal.iloc[0]
     assert "temporal_status" in enrich_route_evidence(routes.iloc[:0], tx)
+
+
+def test_graph_signals_do_not_spread_to_unrelated_edges():
+    edges = pd.DataFrame([(1, 2), (2, 3), (2, 4)], columns=["src", "dst"])
+    tx = pd.DataFrame([(1, 2, "2026-07-02", 100),
+                       (2, 3, "2026-07-03", 95),
+                       (2, 4, "2026-07-01", 95)],
+                      columns=["src", "dst", "date", "sum_kzt"])
+    signals = graph_edge_signals(edges, tx)
+    assert set(signals) == {(1, 2), (2, 3)}
+    assert signals[(2, 3)]["level"] == 2
+    assert "95" in signals[(2, 3)]["text"]
+    tx.loc[1, "date"] = "2026-07-02"
+    signals = graph_edge_signals(edges, tx)
+    assert signals[(2, 3)]["level"] == 1
+    assert "порядок неизвестен" in signals[(2, 3)]["text"]
